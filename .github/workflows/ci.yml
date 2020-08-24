@@ -19,10 +19,10 @@ jobs:
           - nightly
     
         include:
-          - rust: stable
-            features: ""
-          - rust: beta
-            features: ""
+#          - rust: stable
+#            features: ""
+#          - rust: beta
+#            features: ""
           - rust: nightly
             features: "--all-features"
 
