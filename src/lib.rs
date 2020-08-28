@@ -1,10 +1,9 @@
 //! TODO: crate docs
-#![feature(new_uninit)] // this may be avoided `alloc`cating by hand, but it's a lot of pain
-                        //#![deny(missing_docs)] // TODO
+//#![deny(missing_docs)] // TODO
 use core::{
     borrow::Borrow,
-    mem,
-    mem::{transmute, MaybeUninit},
+    iter,
+    mem::{self, transmute, MaybeUninit},
     ops::DerefMut,
     ptr, slice,
     str::Utf8Error,
@@ -150,18 +149,25 @@ impl Strs {
         let req = Strs::required_words_for(vec.as_slice());
 
         // Allocate required memory
-        let mut arc: Arc<[MaybeUninit<usize>]> = Arc::new_uninit_slice(req);
+        //
+        // This is stable analogous to the `Arc::new_uninit_slice(len)` method. Tests[^0] show that
+        // this is as performant, as the nightly methods
+        //
+        // [^0]: https://godbolt.org/z/43b8Kz
+        let mut arc: Arc<[MaybeUninit<usize>]> =
+            iter::repeat(MaybeUninit::uninit()).take(req).collect();
+
         let target = Arc::get_mut(&mut arc).expect("just created, not cloned");
 
         // Initialize `Strs` in place
-        let strs = Strs::from_vec_in_place(vec, target) as *const Strs as *mut Strs;
+        let strs = Strs::init_from_vec(vec, target) as *mut Strs;
 
         Arc::into_raw(arc);
 
         // TODO: fix safety notes for this and next
         // ## Safety
         //
-        // `from_vec_in_place` guarantees that it has written `Strs` to the target.
+        // `init_from_vec` guarantees that it has written `Strs` to the target.
         //
         // `Strs` has the same layout as `[usize]` (e.i.: it won't be UB to dealloc memory with
         // `Strs` layout if it was allocated with `[usize]` layout)
@@ -193,16 +199,23 @@ impl Strs {
         let req = Strs::required_words_for(vec.as_slice());
 
         // Allocate required memory
-        let mut rc: Rc<[MaybeUninit<usize>]> = Rc::new_uninit_slice(req);
+        //
+        // This is stable analogous to the `Arc::new_uninit_slice(len)` method. Tests[^0] show that
+        // this is as performant, as the nightly methods
+        //
+        // [^0]: https://godbolt.org/z/43b8Kz
+        let mut rc: Rc<[MaybeUninit<usize>]> =
+            iter::repeat(MaybeUninit::uninit()).take(req).collect();
+
         let target = Rc::get_mut(&mut rc).expect("just created, not cloned");
 
         // Initialize `Strs` in place
-        let strs = Strs::from_vec_in_place(vec, target) as *const Strs as *mut Strs;
+        let strs = Strs::init_from_vec(vec, target) as *mut Strs;
 
         let _ = Rc::into_raw(rc);
         // ## Safety
         //
-        // `from_vec_in_place` guarantees that it has written `Strs` to the target.
+        // `init_from_vec` guarantees that it has written `Strs` to the target.
         //
         // `Strs` has the same layout as `[usize]` (e.i.: it won't be UB to dealloc memory with
         // `Strs` layout if it was allocated with `[usize]` layout)
@@ -230,17 +243,23 @@ impl Strs {
         let req = Strs::required_words_for(vec.as_slice());
 
         // Allocate required memory
-        let mut boxed: Box<[MaybeUninit<usize>]> = Box::new_uninit_slice(req);
+        //
+        // This is stable analogous to the `Box::new_uninit_slice(len)` method. Tests[^0] show that
+        // this is as performant, as the nightly methods
+        //
+        // [^0]: https://godbolt.org/z/43b8Kz
+        let mut boxed: Box<[MaybeUninit<usize>]> =
+            iter::repeat(MaybeUninit::uninit()).take(req).collect();
 
         // Initialize `Strs` in place
-        let strs = Strs::from_vec_in_place(vec, boxed.deref_mut()) as *const Strs as *mut Strs;
+        let strs = Strs::init_from_vec(vec, boxed.deref_mut()) as *mut Strs;
 
         // Forget
         Box::into_raw(boxed);
 
         // ## Safety
         //
-        // `from_vec_in_place` guarantees that returned reference is the same as input
+        // `init_from_vec` guarantees that returned reference is the same as input
         // (i.e.: it's the same allocation, etc).
         //
         // `Strs` has the same layout as `[usize]` (e.i.: it won't be UB to dealloc memory with
@@ -444,31 +463,9 @@ impl Strs {
     /// No
     pub unsafe fn from_slice_unchecked(slice: &[usize]) -> &Self {
         let len = slice[0];
-        let size = slice[len + 1] - slice[1]; // check if this works for empty
+        let size = slice[len + 1] - slice[1]; // TODO: check if this works for empty
 
-        Self::from_raw_parts(slice.as_ptr(), len, size)
-    }
-
-    /// Creates `Strs` from raw parts.
-    ///
-    /// `ptr` - pointer to the start of the struct, `len` - number of strings contained,
-    /// `size` - total size of all strings combined.
-    ///
-    /// ## Safety
-    ///
-    /// - Caller need to ensure invariants of [`slice::from_raw_parts`][slice_parts] on
-    ///   len: `size + (len + 1) * mem::size_of::<usize>()`
-    /// - It's [ub] to not ensure invariants described in [`from_slice`].
-    ///
-    /// [slice_parts]: core::slice::from_raw_parts
-    /// [ub]: https://doc.rust-lang.org/reference/behavior-considered-undefined.html
-    unsafe fn from_raw_parts<'a>(ptr: *const usize, len: usize, size: usize) -> &'a Self {
-        debug_assert_eq!(*ptr, len);
-
-        let lenght = size + (len + 1) * mem::size_of::<usize>();
-        let ptr = slice::from_raw_parts(ptr as *const (), lenght) as *const [()] as *const Strs;
-
-        &*ptr
+        Self::from_raw_parts(slice.as_ptr(), size)
     }
 
     /// Return space required for creating `Strs` from the given slice in **words**.
@@ -503,16 +500,16 @@ impl Strs {
     /// - `data` part (not `size` though) of the output reference points to the same location as
     ///   `target`, this means that e.g. if `target` was received from `Box` you can recreate
     ///   `Box<Strs>` from output of this function
-    /// - After calling it `target` will be fully initialized e.i.: calling `.assume_init()` on
-    ///   `target` **won't** be UB
+    /// - After calling it `target` will be fully initialized e.i.: calling
+    ///   `MaybeUninit::slice_get_mut(target)` **won't** be UB
     ///
     /// ## Panics
     ///
     ///
-    pub fn from_vec_in_place<T: Borrow<str>>(
+    pub fn init_from_vec<T: Borrow<str>>(
         vec: Vec<T>,
         target: &mut [MaybeUninit<usize>],
-    ) -> &Self {
+    ) -> &mut Self {
         let (required_words, size) = Self::required_words_for_and_size(vec.as_slice());
         let len = vec.len();
         let indices = len + 1;
@@ -572,7 +569,7 @@ impl Strs {
             ptr::write_bytes(buf_ptr.add(offset), 0, tail);
         }
 
-        unsafe { Self::from_raw_parts(target.as_ptr() as *const usize, len, size) }
+        unsafe { Self::from_raw_parts_mut(target.as_mut_ptr().cast::<usize>(), size) }
     }
 }
 
@@ -599,6 +596,48 @@ impl<T: Borrow<str>> From<Vec<T>> for Box<Strs> {
 }
 
 impl Strs {
+    /// Creates `Strs` from raw parts.
+    ///
+    /// `ptr` - pointer to the start of the struct, `len` - number of strings contained,
+    /// `size` - total size of all strings combined.
+    ///
+    /// ## Safety
+    ///
+    /// - Caller need to ensure invariants of [`slice::from_raw_parts`][slice_parts] on
+    ///   len: `size + (len + 1) * mem::size_of::<usize>()`
+    /// - It's [ub] to not ensure invariants described in [`from_slice`].
+    ///
+    /// [slice_parts]: core::slice::from_raw_parts
+    /// [ub]: https://doc.rust-lang.org/reference/behavior-considered-undefined.html
+    unsafe fn from_raw_parts<'a>(ptr: *const usize, size: usize) -> &'a Self {
+        let len = *ptr;
+
+        let length = size + (len + 1) * mem::size_of::<usize>();
+        let ptr = slice::from_raw_parts(ptr.cast::<()>(), length) as *const [()] as *const Strs;
+
+        &*ptr
+    }
+
+    /// Performs the same functionality as [`from_raw_parts`], except that a mutable `Strs` is
+    /// returned.
+    ///
+    /// ## Safety
+    ///
+    /// - Caller need to ensure invariants of [`slice::from_raw_parts_mut`][slice_parts] on
+    ///   len: `size + (len + 1) * mem::size_of::<usize>()`
+    /// - It's [ub] to not ensure invariants described in [`from_slice`].
+    ///
+    /// [slice_parts]: core::slice::from_raw_parts_mut
+    /// [ub]: https://doc.rust-lang.org/reference/behavior-considered-undefined.html
+    unsafe fn from_raw_parts_mut<'a>(ptr: *mut usize, size: usize) -> &'a mut Self {
+        let len = *ptr;
+
+        let length = size + (len + 1) * mem::size_of::<usize>();
+        let ptr = slice::from_raw_parts_mut(ptr.cast::<()>(), length) as *mut [()] as *mut Strs;
+
+        &mut *ptr
+    }
+
     /// Get bounds of the `idx`th element.
     ///
     /// E.g. `strs[1]` would be equal to
@@ -633,7 +672,7 @@ pub(crate) fn ceiling_div(n: usize, d: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use crate::Strs;
-    use core::mem;
+    use core::mem::{self, MaybeUninit};
 
     #[test]
     fn from_vec() {
@@ -658,9 +697,9 @@ mod tests {
 
     #[test]
     fn tail_is_initialized() {
-        let mut uninit = Box::new_uninit_slice(Strs::required_words_for(&["x"]));
+        let mut uninit = box_new_uninit_slice(Strs::required_words_for(&["x"]));
 
-        let _ = Strs::from_vec_in_place(vec!["x"], &mut *uninit);
+        let _ = Strs::init_from_vec(vec!["x"], &mut *uninit);
 
         let mut tail = [0; mem::size_of::<usize>()];
         tail[0] = b'x';
@@ -672,7 +711,7 @@ mod tests {
         ];
 
         unsafe {
-            assert_eq!(&*uninit.assume_init(), &buf);
+            assert_eq!(&*box_assume_init(uninit), &buf);
         }
     }
 
@@ -686,8 +725,8 @@ mod tests {
   left: `4`,
  right: `3`: `target` is bigger or smaller that required for this operation")]
     fn not_enough_space() {
-        let mut uninit = Box::new_uninit_slice(Strs::required_words_for(&["x"]) - 1);
-        let _ = Strs::from_vec_in_place(vec!["x"], &mut *uninit);
+        let mut uninit = box_new_uninit_slice(Strs::required_words_for(&["x"]) - 1);
+        let _ = Strs::init_from_vec(vec!["x"], &mut *uninit);
     }
 
     #[test]
@@ -695,11 +734,22 @@ mod tests {
   left: `4`,
  right: `5`: `target` is bigger or smaller that required for this operation")]
     fn too_much_space() {
-        let mut uninit = Box::new_uninit_slice(Strs::required_words_for(&["x"]) + 1);
-        let _ = Strs::from_vec_in_place(vec!["x"], &mut *uninit);
+        let mut uninit = box_new_uninit_slice(Strs::required_words_for(&["x"]) + 1);
+        let _ = Strs::init_from_vec(vec!["x"], &mut *uninit);
     }
 
     // TODO:
     //#[test]
     //fn malicious_borrow() {}
+
+    // stable analog for Box::new_uninit_slice
+    fn box_new_uninit_slice(req: usize) -> Box<[MaybeUninit<usize>]> {
+        core::iter::repeat(MaybeUninit::uninit())
+            .take(req)
+            .collect()
+    }
+
+    unsafe fn box_assume_init(this: Box<[MaybeUninit<usize>]>) -> Box<[usize]> {
+        Box::from_raw(Box::into_raw(this) as *mut [usize])
+    }
 }

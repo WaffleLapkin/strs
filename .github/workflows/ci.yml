@@ -14,17 +14,17 @@ jobs:
     strategy:
       matrix:
         rust: 
-#          - stable
-#          - beta
+          - stable
+          - beta
           - nightly
     
         include:
-#          - rust: stable
-#            features: ""
-#          - rust: beta
-#            features: ""
+          - rust: stable
+            features: ""
+          - rust: beta
+            features: ""
           - rust: nightly
-            features: "--all-features"
+            features: ""
 
     steps:
       - uses: actions/checkout@v1
