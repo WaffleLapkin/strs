@@ -1,4 +1,5 @@
 //! TODO: crate docs
+#![cfg_attr(feature = "nightly", feature(exact_size_is_empty))]
 //#![deny(missing_docs)] // TODO
 use core::{
     borrow::Borrow,
@@ -326,6 +327,29 @@ impl Strs {
         //
         // We've just checked all invariants
         unsafe { Ok(Self::from_slice_unchecked(slice)) }
+    }
+
+    /// Returns an iterator over the strings in `Strs`.
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use strs::Strs;
+    ///
+    /// let strs = Strs::boxed(&["aaaa", "hahaha", "AAAAAAA"]);
+    /// let mut iter = strs.iter();
+    ///
+    /// assert_eq!(iter.next(), Some("aaaa"));
+    /// assert_eq!(iter.next_back(), Some("AAAAAAA"));
+    /// assert_eq!(iter.next(), Some("hahaha"));
+    /// assert_eq!(iter.next(), None);
+    /// ```
+    pub fn iter(&self) -> Iter {
+        Iter {
+            strs: self,
+            forth_idx: 0,
+            back_idx: self.len(),
+        }
     }
 
     /// View entire underling buffer as `&str`
@@ -670,6 +694,84 @@ impl Strs {
     }
 }
 
+/// Iterator over strings in [`Strs`]
+///
+/// See [`Strs::iter`]
+pub struct Iter<'a> {
+    strs: &'a Strs,
+    // TODO: probably it would be better to implement this with pointers to idx buffer
+    forth_idx: usize,
+    back_idx: usize,
+}
+
+impl<'a> Iterator for Iter<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.forth_idx == self.back_idx {
+            return None;
+        }
+
+        unsafe {
+            // ## Safety
+            //
+            // `forth_idx` is initialized with 0 and only increases,
+            // `bach_idx` is initialized with strs.len() and only decreases,
+            // If `forth_idx == back_idx` then they never change again.
+            //
+            // This means that 0 <= forth_idx < strs.len() and thus it's safe
+            let res = Some(self.strs.get_unchecked(self.forth_idx));
+            self.forth_idx += 1;
+            res
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.len();
+        (len, Some(len))
+    }
+}
+
+impl<'a> DoubleEndedIterator for Iter<'a> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.forth_idx == self.back_idx {
+            return None;
+        }
+
+        unsafe {
+            // ## Safety
+            //
+            // `forth_idx` is initialized with 0 and only increases,
+            // `bach_idx` is initialized with strs.len() and only decreases,
+            // If `forth_idx == back_idx` then they never change again.
+            //
+            // This means that 0 <= (back_idx - 1) < strs.len() and thus it's safe
+            self.back_idx -= 1;
+            Some(self.strs.get_unchecked(self.back_idx))
+        }
+    }
+}
+
+impl ExactSizeIterator for Iter<'_> {
+    fn len(&self) -> usize {
+        self.back_idx - self.forth_idx
+    }
+
+    #[cfg(feature = "nightly")]
+    fn is_empty(&self) -> bool {
+        self.back_idx == self.forth_idx
+    }
+}
+
+impl<'a> IntoIterator for &'a Strs {
+    type Item = &'a str;
+    type IntoIter = Iter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 pub(crate) fn ceiling_div(n: usize, d: usize) -> usize {
     (n / d) + ((n % d != 0) as usize)
 }
@@ -736,6 +838,37 @@ mod tests {
     #[test]
     fn from_empty_str() {
         let _ = Strs::boxed(&[""]);
+    }
+
+    #[test]
+    fn iter() {
+        assert_eq!(Strs::EMPTY.iter().collect::<Vec<_>>(), Vec::<&str>::new());
+        assert_eq!(Strs::EMPTY.iter().len(), 0);
+
+        assert_eq!(
+            Strs::boxed(&["a", "b'", "ccc"]).iter().collect::<Vec<_>>(),
+            vec!["a", "b'", "ccc"]
+        );
+        assert_eq!(
+            Strs::boxed(&["x", "y", "z"])
+                .iter()
+                .rev()
+                .collect::<Vec<_>>(),
+            vec!["z", "y", "x"]
+        );
+
+        let strs = Strs::boxed(&["x", "y", "z", "a", "b"]);
+        let mut iter = strs.iter();
+        assert_eq!(iter.len(), 5);
+        assert_eq!(iter.next(), Some("x"));
+        assert_eq!(iter.next(), Some("y"));
+        assert_eq!(iter.next_back(), Some("b"));
+        assert_eq!(iter.len(), 2);
+        assert_eq!(iter.next(), Some("z"));
+        assert_eq!(iter.next_back(), Some("a"));
+        assert_eq!(iter.len(), 0);
+        assert_eq!(iter.next_back(), None);
+        assert_eq!(iter.next(), None);
     }
 
     #[test]
