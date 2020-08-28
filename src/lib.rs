@@ -3,7 +3,7 @@
 //#![deny(missing_docs)] // TODO
 use core::{
     borrow::Borrow,
-    iter,
+    fmt, iter,
     mem::{self, transmute, MaybeUninit},
     ops::DerefMut,
     ptr, slice,
@@ -76,7 +76,6 @@ use std::{process::abort, rc::Rc, sync::Arc};
 /// [box]: Box
 /// [arc]: std::sync::Arc
 /// [rc]: std::rc::Rc
-#[derive(Debug)]
 #[repr(C)]
 pub struct Strs {
     /// Number of strings contained
@@ -624,6 +623,23 @@ impl<S: Borrow<str>> From<&[S]> for Box<Strs> {
     }
 }
 
+impl fmt::Debug for Strs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        struct Helper<'a>(&'a Strs);
+
+        impl fmt::Debug for Helper<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_list().entries(self.0.iter()).finish()
+            }
+        }
+
+        f.debug_struct("Strs")
+            .field("len", &self.len)
+            .field("strs", &Helper(self))
+            .finish()
+    }
+}
+
 impl Strs {
     /// Creates `Strs` from raw parts.
     ///
@@ -869,6 +885,15 @@ mod tests {
         assert_eq!(iter.len(), 0);
         assert_eq!(iter.next_back(), None);
         assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn debug() {
+        assert_eq!(format!("{:?}", Strs::EMPTY), "Strs { len: 0, strs: [] }");
+        assert_eq!(
+            format!("{:?}", Strs::boxed(&["42", "xir"])),
+            "Strs { len: 2, strs: [\"42\", \"xir\"] }"
+        );
     }
 
     #[test]
