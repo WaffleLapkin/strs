@@ -3,7 +3,10 @@
 //#![deny(missing_docs)] // TODO
 use core::{
     borrow::Borrow,
-    fmt, iter,
+    cmp::Ordering,
+    fmt,
+    hash::{Hash, Hasher},
+    iter,
     mem::{self, transmute, MaybeUninit},
     ops::DerefMut,
     ptr, slice,
@@ -644,6 +647,32 @@ impl fmt::Debug for Strs {
 impl Borrow<str> for Strs {
     fn borrow(&self) -> &str {
         self.as_str()
+    }
+}
+
+impl PartialEq for Strs {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl Eq for Strs {}
+
+impl PartialOrd for Strs {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.as_str().partial_cmp(other.as_str())
+    }
+}
+
+impl Ord for Strs {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.as_str().cmp(other.as_str())
+    }
+}
+
+impl Hash for Strs {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_str().hash(state)
     }
 }
 
