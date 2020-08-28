@@ -749,6 +749,7 @@ impl Strs {
 /// Iterator over strings in [`Strs`]
 ///
 /// See [`Strs::iter`]
+#[derive(Debug)]
 pub struct Iter<'a> {
     strs: &'a Strs,
     // TODO: probably it would be better to implement this with pointers to idx buffer
