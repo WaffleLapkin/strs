@@ -533,11 +533,10 @@ impl Strs {
         for (idx, s) in slice.iter().enumerate() {
             let str = s.borrow();
 
-            // Double check that we didn't run out of space because `T::borrow` may be
+            // Double check that we didn't run out of space because `S::borrow` may be
             // malicious and return different strings upon calls (I wish it was pure...)
             if offset + str.len() > target_buf_bytes {
-                // aborting because who the fuck are writing malicious `borrow`s???
-                abort();
+                malicious_borrow(0)
             }
 
             unsafe {
@@ -560,10 +559,9 @@ impl Strs {
             let tail = target_buf_bytes - offset;
 
             // Double check that we've spent all space except last (usize-1)
-            // (yet again malicious `T::borrow`)
+            // (yet again malicious `S::borrow`)
             if tail >= mem::size_of::<usize>() {
-                // aborting because who the fuck are writing malicious `borrow`s???
-                abort();
+                malicious_borrow(1)
             }
 
             // Fill/initialize the tail to guarantee that `target` is fully initialized
@@ -676,10 +674,23 @@ pub(crate) fn ceiling_div(n: usize, d: usize) -> usize {
     (n / d) + ((n % d != 0) as usize)
 }
 
+#[track_caller]
+#[cfg_attr(test, allow(unreachable_code))]
+pub(crate) fn malicious_borrow(_n: u8) -> ! {
+    // Panic in tests to test that we actually detect malicious borrows
+    #[cfg(test)]
+    panic!("malicious S::borrow ({})", _n);
+
+    // aborting because who the fuck are writing malicious `borrow`s???
+    abort()
+}
+
 #[cfg(test)]
 mod tests {
     use crate::Strs;
     use core::mem::{self, MaybeUninit};
+    use std::borrow::Borrow;
+    use std::cell::Cell;
 
     #[test]
     fn from_vec() {
@@ -745,9 +756,53 @@ mod tests {
         let _ = Strs::init_from_slice(&["x"], &mut *uninit);
     }
 
-    // TODO:
-    //#[test]
-    //fn malicious_borrow() {}
+    #[test]
+    #[should_panic(expected = "malicious S::borrow (0)")]
+    fn malicious_borrow_greater() {
+        let badarr = [MaliciousBorrow {
+            n: Cell::new(0),
+            // lengths should differ such that
+            // ceiling_div(l.len(), size_of::<usize>()) != ceiling_div(g.len(), size_of::<usize>())
+            l: "a",
+            g: "bbbbbbbbb",
+        }];
+        let _ = Strs::boxed(&badarr);
+    }
+
+    #[test]
+    #[should_panic(expected = "malicious S::borrow (1)")]
+    fn malicious_borrow_less() {
+        let badarr = [MaliciousBorrow {
+            n: Cell::new(0),
+            // lengths should differ such that
+            // ceiling_div(l.len(), size_of::<usize>()) != ceiling_div(g.len(), size_of::<usize>())
+            l: "aaaaaaaaa",
+            g: "b",
+        }];
+        let _ = Strs::boxed(&badarr);
+    }
+
+    /// A test util structure that returns `self.l` upon first 2 calls to `.borrow()`
+    /// and self.g from 3-rd.
+    struct MaliciousBorrow {
+        n: Cell<u8>,
+        l: &'static str,
+        g: &'static str,
+    }
+
+    impl Borrow<str> for MaliciousBorrow {
+        fn borrow(&self) -> &str {
+            let val = self.n.get();
+            // `required_words_for_and_size` is called in both `Strs::boxed`
+            // and Strs::init_from_slice
+            if val < 2 {
+                self.n.set(val + 1);
+                self.l
+            } else {
+                self.g
+            }
+        }
+    }
 
     // stable analog for Box::new_uninit_slice
     fn box_new_uninit_slice(req: usize) -> Box<[MaybeUninit<usize>]> {
