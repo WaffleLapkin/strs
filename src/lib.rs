@@ -506,6 +506,7 @@ impl Strs {
     /// ## Panics
     ///
     ///
+    #[track_caller]
     pub fn init_from_vec<T: Borrow<str>>(
         vec: Vec<T>,
         target: &mut [MaybeUninit<usize>],
@@ -576,7 +577,7 @@ impl Strs {
 impl std::ops::Index<usize> for Strs {
     type Output = str;
 
-    // TODO: #[track_caller]
+    #[track_caller]
     fn index(&self, idx: usize) -> &str {
         match self.get(idx) {
             Some(ret) => ret,
