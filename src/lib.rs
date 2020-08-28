@@ -128,7 +128,7 @@ impl Strs {
         }
     };
 
-    /// Creates `Arc<Strs>` from `Vec<T: Borrow<str>>`.
+    /// Creates `Arc<Strs>` from `&[S: Borrow<str>]`.
     ///
     /// ## Examples
     ///
@@ -136,7 +136,7 @@ impl Strs {
     /// use std::sync::Arc;
     /// use strs::Strs;
     ///
-    /// let arced: Arc<Strs> = Strs::arced(vec!["Hello,", " ", "world", "!"]);
+    /// let arced: Arc<Strs> = Strs::arced(&["Hello,", " ", "world", "!"]);
     /// let clone = Arc::clone(&arced);
     ///
     /// assert_eq!(arced.as_str(), "Hello, world!");
@@ -145,8 +145,8 @@ impl Strs {
     /// assert_eq!(&arced[0], "Hello,");
     /// assert_eq!(&clone[2], "world");
     /// ```
-    pub fn arced<T: Borrow<str>>(vec: Vec<T>) -> Arc<Self> {
-        let req = Strs::required_words_for(vec.as_slice());
+    pub fn arced<S: Borrow<str>>(slice: &[S]) -> Arc<Self> {
+        let req = Strs::required_words_for(slice);
 
         // Allocate required memory
         //
@@ -160,21 +160,21 @@ impl Strs {
         let target = Arc::get_mut(&mut arc).expect("just created, not cloned");
 
         // Initialize `Strs` in place
-        let strs = Strs::init_from_vec(vec, target) as *mut Strs;
+        let strs = Strs::init_from_slice(slice, target) as *mut Strs;
 
         Arc::into_raw(arc);
 
         // TODO: fix safety notes for this and next
         // ## Safety
         //
-        // `init_from_vec` guarantees that it has written `Strs` to the target.
+        // `init_from_slice` guarantees that it has written `Strs` to the target.
         //
         // `Strs` has the same layout as `[usize]` (e.i.: it won't be UB to dealloc memory with
         // `Strs` layout if it was allocated with `[usize]` layout)
         unsafe { Arc::from_raw(strs) }
     }
 
-    /// Creates `Rc<Strs>` from `Vec<T: Borrow<str>>`.
+    /// Creates `Rc<Strs>` from `&[S: Borrow<str>]`.
     ///
     /// ## Examples
     ///
@@ -182,7 +182,7 @@ impl Strs {
     /// use std::rc::Rc;
     /// use strs::Strs;
     ///
-    /// let rced: Rc<Strs> = Strs::rced(vec!["Hello,", " ", "world", "!"]);
+    /// let rced: Rc<Strs> = Strs::rced(&["Hello,", " ", "world", "!"]);
     /// let clone = Rc::clone(&rced);
     ///
     /// assert_eq!(rced.as_str(), "Hello, world!");
@@ -195,8 +195,8 @@ impl Strs {
     /// ## See also
     ///
     ///
-    pub fn rced<T: Borrow<str>>(vec: Vec<T>) -> Rc<Self> {
-        let req = Strs::required_words_for(vec.as_slice());
+    pub fn rced<S: Borrow<str>>(slice: &[S]) -> Rc<Self> {
+        let req = Strs::required_words_for(slice);
 
         // Allocate required memory
         //
@@ -210,19 +210,19 @@ impl Strs {
         let target = Rc::get_mut(&mut rc).expect("just created, not cloned");
 
         // Initialize `Strs` in place
-        let strs = Strs::init_from_vec(vec, target) as *mut Strs;
+        let strs = Strs::init_from_slice(slice, target) as *mut Strs;
 
         let _ = Rc::into_raw(rc);
         // ## Safety
         //
-        // `init_from_vec` guarantees that it has written `Strs` to the target.
+        // `init_from_slice` guarantees that it has written `Strs` to the target.
         //
         // `Strs` has the same layout as `[usize]` (e.i.: it won't be UB to dealloc memory with
         // `Strs` layout if it was allocated with `[usize]` layout)
         unsafe { Rc::from_raw(strs) }
     }
 
-    /// Creates `Box<Strs>` from `Vec<T: Borrow<str>>`.
+    /// Creates `Box<Strs>` from `&[S: Borrow<str>]`.
     ///
     /// ## Examples
     ///
@@ -230,7 +230,7 @@ impl Strs {
     /// use std::boxed::Box;
     /// use strs::Strs;
     ///
-    /// let boxed: Box<Strs> = Strs::boxed(vec!["Hello,", " ", "world", "!"]);
+    /// let boxed: Box<Strs> = Strs::boxed(&["Hello,", " ", "world", "!"]);
     ///
     /// assert_eq!(boxed.as_str(), "Hello, world!");
     /// assert_eq!(&boxed[0], "Hello,");
@@ -239,8 +239,8 @@ impl Strs {
     /// ## See also
     ///
     ///
-    pub fn boxed<T: Borrow<str>>(vec: Vec<T>) -> Box<Self> {
-        let req = Strs::required_words_for(vec.as_slice());
+    pub fn boxed<S: Borrow<str>>(slice: &[S]) -> Box<Self> {
+        let req = Strs::required_words_for(slice);
 
         // Allocate required memory
         //
@@ -252,14 +252,14 @@ impl Strs {
             iter::repeat(MaybeUninit::uninit()).take(req).collect();
 
         // Initialize `Strs` in place
-        let strs = Strs::init_from_vec(vec, boxed.deref_mut()) as *mut Strs;
+        let strs = Strs::init_from_slice(slice, boxed.deref_mut()) as *mut Strs;
 
         // Forget
         Box::into_raw(boxed);
 
         // ## Safety
         //
-        // `init_from_vec` guarantees that returned reference is the same as input
+        // `init_from_slice` guarantees that returned reference is the same as input
         // (i.e.: it's the same allocation, etc).
         //
         // `Strs` has the same layout as `[usize]` (e.i.: it won't be UB to dealloc memory with
@@ -507,12 +507,12 @@ impl Strs {
     ///
     ///
     #[track_caller]
-    pub fn init_from_vec<T: Borrow<str>>(
-        vec: Vec<T>,
-        target: &mut [MaybeUninit<usize>],
-    ) -> &mut Self {
-        let (required_words, size) = Self::required_words_for_and_size(vec.as_slice());
-        let len = vec.len();
+    pub fn init_from_slice<'t, S: Borrow<str>>(
+        slice: &[S],
+        target: &'t mut [MaybeUninit<usize>],
+    ) -> &'t mut Self {
+        let (required_words, size) = Self::required_words_for_and_size(slice);
+        let len = slice.len();
         let indices = len + 1;
 
         // Check that size of target is exactly equal to required
@@ -530,7 +530,7 @@ impl Strs {
 
         // offset from `buf_ptr` to the empty place
         let mut offset = indices * mem::size_of::<usize>();
-        for (idx, s) in vec.into_iter().enumerate() {
+        for (idx, s) in slice.iter().enumerate() {
             let str = s.borrow();
 
             // Double check that we didn't run out of space because `T::borrow` may be
@@ -590,9 +590,15 @@ impl std::ops::Index<usize> for Strs {
     }
 }
 
-impl<T: Borrow<str>> From<Vec<T>> for Box<Strs> {
-    fn from(vec: Vec<T>) -> Self {
-        Strs::boxed(vec)
+impl<S: Borrow<str>> From<Vec<S>> for Box<Strs> {
+    fn from(vec: Vec<S>) -> Self {
+        vec.as_slice().into()
+    }
+}
+
+impl<S: Borrow<str>> From<&[S]> for Box<Strs> {
+    fn from(slice: &[S]) -> Self {
+        Strs::boxed(slice)
     }
 }
 
@@ -677,7 +683,7 @@ mod tests {
 
     #[test]
     fn from_vec() {
-        let vec: Vec<&str> = vec!["a", "36dx1LOPnHgobIhUF3Ik", "", "", "fffff", "NWUzxiexni48"];
+        let strings = ["a", "36dx1LOPnHgobIhUF3Ik", "", "", "fffff", "NWUzxiexni48"];
 
         fn assertions(s: &Strs) {
             assert_eq!(s.len(), 6);
@@ -691,16 +697,16 @@ mod tests {
             assert_eq!(s.as_str(), "a36dx1LOPnHgobIhUF3IkfffffNWUzxiexni48");
         }
 
-        assertions(Box::<Strs>::from(vec.clone()).as_ref());
-        assertions(Strs::arced(vec.clone()).as_ref());
-        assertions(Strs::rced(vec.clone()).as_ref());
+        assertions(Strs::boxed(&strings).as_ref());
+        assertions(Strs::arced(&strings).as_ref());
+        assertions(Strs::rced(&strings).as_ref());
     }
 
     #[test]
     fn tail_is_initialized() {
         let mut uninit = box_new_uninit_slice(Strs::required_words_for(&["x"]));
 
-        let _ = Strs::init_from_vec(vec!["x"], &mut *uninit);
+        let _ = Strs::init_from_slice(&["x"], &mut *uninit);
 
         let mut tail = [0; mem::size_of::<usize>()];
         tail[0] = b'x';
@@ -718,7 +724,7 @@ mod tests {
 
     #[test]
     fn from_empty_str() {
-        let _ = Box::<Strs>::from(vec![""]);
+        let _ = Strs::boxed(&[""]);
     }
 
     #[test]
@@ -727,7 +733,7 @@ mod tests {
  right: `3`: `target` is bigger or smaller that required for this operation")]
     fn not_enough_space() {
         let mut uninit = box_new_uninit_slice(Strs::required_words_for(&["x"]) - 1);
-        let _ = Strs::init_from_vec(vec!["x"], &mut *uninit);
+        let _ = Strs::init_from_slice(&["x"], &mut *uninit);
     }
 
     #[test]
@@ -736,7 +742,7 @@ mod tests {
  right: `5`: `target` is bigger or smaller that required for this operation")]
     fn too_much_space() {
         let mut uninit = box_new_uninit_slice(Strs::required_words_for(&["x"]) + 1);
-        let _ = Strs::init_from_vec(vec!["x"], &mut *uninit);
+        let _ = Strs::init_from_slice(&["x"], &mut *uninit);
     }
 
     // TODO:
