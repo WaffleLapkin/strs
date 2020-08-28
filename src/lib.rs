@@ -640,6 +640,13 @@ impl fmt::Debug for Strs {
     }
 }
 
+/// Note: this borrows the whole underling string, same as [`Strs::as_str`]
+impl Borrow<str> for Strs {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
 impl Strs {
     /// Creates `Strs` from raw parts.
     ///
