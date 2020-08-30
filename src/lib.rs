@@ -654,15 +654,18 @@ impl fmt::Debug for Strs {
 }
 
 /// Note: this borrows the whole underling string, same as [`Strs::as_str`]
-impl Borrow<str> for Strs {
-    fn borrow(&self) -> &str {
+impl AsRef<str> for Strs {
+    fn as_ref(&self) -> &str {
         self.as_str()
     }
 }
 
 impl PartialEq for Strs {
     fn eq(&self, other: &Self) -> bool {
-        self.as_str() == other.as_str()
+        // We use `as_raw` instead of `as_str` to compare indices too
+        //
+        // Also, we store the `len` at the beginning, so if lens are not equal this will fast-exit
+        self.as_raw() == other.as_raw()
     }
 }
 
@@ -670,19 +673,34 @@ impl Eq for Strs {}
 
 impl PartialOrd for Strs {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        self.as_str().partial_cmp(other.as_str())
+        Some(self.cmp(other))
     }
 }
 
 impl Ord for Strs {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.as_str().cmp(other.as_str())
+        let mut left = self.iter();
+        let right = other.iter();
+
+        for (l, r) in left.by_ref().zip(right) {
+            // I wish we had or-patterns
+            if let ret @ Ordering::Less | ret @ Ordering::Greater = l.cmp(r) {
+                 return ret;
+            }
+        }
+
+        // The head of both iterators are equal, then bigger is the one that is bigger
+        match left.next() {
+            Some(_) => Ordering::Greater,
+            None => Ordering::Less,
+        }
     }
 }
 
 impl Hash for Strs {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.as_str().hash(state)
+        // Note: `as_raw` is used instead of `as_str` to hash indices and len too
+        self.as_raw().hash(state)
     }
 }
 
@@ -926,6 +944,12 @@ mod tests {
     #[test]
     fn from_empty_str() {
         let _ = Strs::boxed(&[""]);
+    }
+
+    #[test]
+    fn eq_neq() {
+        assert_eq!(Strs::boxed(&["axd", "FF"]), Strs::boxed(&["axd", "FF"]));
+        assert_ne!(Strs::boxed(&["X", ""]), Strs::boxed(&["", "X"]));
     }
 
     #[test]
