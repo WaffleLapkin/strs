@@ -2,7 +2,7 @@
 #![cfg_attr(feature = "nightly", feature(exact_size_is_empty))]
 //#![deny(missing_docs)] // TODO
 use core::{
-    borrow::Borrow,
+    convert::AsRef,
     cmp::Ordering,
     fmt,
     hash::{Hash, Hasher},
@@ -131,7 +131,7 @@ impl Strs {
         }
     };
 
-    /// Creates `Arc<Strs>` from `&[S: Borrow<str>]`.
+    /// Creates `Arc<Strs>` from `&[S: AsRef<str>]`.
     ///
     /// ## Examples
     ///
@@ -148,7 +148,7 @@ impl Strs {
     /// assert_eq!(&arced[0], "Hello,");
     /// assert_eq!(&clone[2], "world");
     /// ```
-    pub fn arced<S: Borrow<str>>(slice: &[S]) -> Arc<Self> {
+    pub fn arced<S: AsRef<str>>(slice: &[S]) -> Arc<Self> {
         let req = Strs::required_words_for(slice);
 
         // Allocate required memory
@@ -177,7 +177,7 @@ impl Strs {
         unsafe { Arc::from_raw(strs) }
     }
 
-    /// Creates `Rc<Strs>` from `&[S: Borrow<str>]`.
+    /// Creates `Rc<Strs>` from `&[S: AsRef<str>]`.
     ///
     /// ## Examples
     ///
@@ -198,7 +198,7 @@ impl Strs {
     /// ## See also
     ///
     ///
-    pub fn rced<S: Borrow<str>>(slice: &[S]) -> Rc<Self> {
+    pub fn rced<S: AsRef<str>>(slice: &[S]) -> Rc<Self> {
         let req = Strs::required_words_for(slice);
 
         // Allocate required memory
@@ -225,7 +225,7 @@ impl Strs {
         unsafe { Rc::from_raw(strs) }
     }
 
-    /// Creates `Box<Strs>` from `&[S: Borrow<str>]`.
+    /// Creates `Box<Strs>` from `&[S: AsRef<str>]`.
     ///
     /// ## Examples
     ///
@@ -242,7 +242,7 @@ impl Strs {
     /// ## See also
     ///
     ///
-    pub fn boxed<S: Borrow<str>>(slice: &[S]) -> Box<Self> {
+    pub fn boxed<S: AsRef<str>>(slice: &[S]) -> Box<Self> {
         let req = Strs::required_words_for(slice);
 
         // Allocate required memory
@@ -508,12 +508,12 @@ impl Strs {
     ///
     /// That's it - to create `Strs` from `slice` you need a `&[usize]`-slice with
     /// `.len() == Strs::required_words_for(slice)`
-    pub fn required_words_for<T: Borrow<str>>(slice: &[T]) -> usize {
+    pub fn required_words_for<T: AsRef<str>>(slice: &[T]) -> usize {
         Self::required_words_for_and_size(slice).0
     }
 
-    fn required_words_for_and_size<T: Borrow<str>>(slice: &[T]) -> (usize, usize) {
-        let size: usize = slice.iter().map(|s| s.borrow().len()).sum();
+    fn required_words_for_and_size<T: AsRef<str>>(slice: &[T]) -> (usize, usize) {
+        let size: usize = slice.iter().map(|s| s.as_ref().len()).sum();
         let len = slice.len();
 
         // `len` field + indices + payload
@@ -543,7 +543,7 @@ impl Strs {
     ///
     ///
     #[track_caller]
-    pub fn init_from_slice<'t, S: Borrow<str>>(
+    pub fn init_from_slice<'t, S: AsRef<str>>(
         slice: &[S],
         target: &'t mut [MaybeUninit<usize>],
     ) -> &'t mut Self {
@@ -567,12 +567,12 @@ impl Strs {
         // offset from `buf_ptr` to the empty place
         let mut offset = indices * mem::size_of::<usize>();
         for (idx, s) in slice.iter().enumerate() {
-            let str = s.borrow();
+            let str = s.as_ref();
 
-            // Double check that we didn't run out of space because `S::borrow` may be
+            // Double check that we didn't run out of space because `S::as_ref` may be
             // malicious and return different strings upon calls (I wish it was pure...)
             if offset + str.len() > target_buf_bytes {
-                malicious_borrow(0)
+                malicious_as_ref(0)
             }
 
             unsafe {
@@ -595,9 +595,9 @@ impl Strs {
             let tail = target_buf_bytes - offset;
 
             // Double check that we've spent all space except last (usize-1)
-            // (yet again malicious `S::borrow`)
+            // (yet again malicious `S::as_ref`)
             if tail >= mem::size_of::<usize>() {
-                malicious_borrow(1)
+                malicious_as_ref(1)
             }
 
             // Fill/initialize the tail to guarantee that `target` is fully initialized
@@ -624,13 +624,13 @@ impl std::ops::Index<usize> for Strs {
     }
 }
 
-impl<S: Borrow<str>> From<Vec<S>> for Box<Strs> {
+impl<S: AsRef<str>> From<Vec<S>> for Box<Strs> {
     fn from(vec: Vec<S>) -> Self {
         vec.as_slice().into()
     }
 }
 
-impl<S: Borrow<str>> From<&[S]> for Box<Strs> {
+impl<S: AsRef<str>> From<&[S]> for Box<Strs> {
     fn from(slice: &[S]) -> Self {
         Strs::boxed(slice)
     }
@@ -884,12 +884,12 @@ pub(crate) fn ceiling_div(n: usize, d: usize) -> usize {
 
 #[track_caller]
 #[cfg_attr(test, allow(unreachable_code))]
-pub(crate) fn malicious_borrow(_n: u8) -> ! {
-    // Panic in tests to test that we actually detect malicious borrows
+pub(crate) fn malicious_as_ref(_n: u8) -> ! {
+    // Panic in tests to test that we actually detect malicious `as_ref`s
     #[cfg(test)]
-    panic!("malicious S::borrow ({})", _n);
+    panic!("malicious S::as_ref ({})", _n);
 
-    // aborting because who the fuck are writing malicious `borrow`s???
+    // aborting because who the fuck are writing malicious `as_ref`s???
     abort()
 }
 
@@ -897,7 +897,7 @@ pub(crate) fn malicious_borrow(_n: u8) -> ! {
 mod tests {
     use crate::Strs;
     use core::mem::{self, MaybeUninit};
-    use std::borrow::Borrow;
+    use std::convert::AsRef;
     use std::cell::Cell;
 
     #[test]
@@ -1020,9 +1020,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "malicious S::borrow (0)")]
-    fn malicious_borrow_greater() {
-        let badarr = [MaliciousBorrow {
+    #[should_panic(expected = "malicious S::as_ref (0)")]
+    fn malicious_as_ref_greater() {
+        let badarr = [MaliciousAsRef {
             n: Cell::new(0),
             // lengths should differ such that
             // ceiling_div(l.len(), size_of::<usize>()) != ceiling_div(g.len(), size_of::<usize>())
@@ -1033,9 +1033,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "malicious S::borrow (1)")]
-    fn malicious_borrow_less() {
-        let badarr = [MaliciousBorrow {
+    #[should_panic(expected = "malicious S::as_ref (1)")]
+    fn malicious_as_ref_less() {
+        let badarr = [MaliciousAsRef {
             n: Cell::new(0),
             // lengths should differ such that
             // ceiling_div(l.len(), size_of::<usize>()) != ceiling_div(g.len(), size_of::<usize>())
@@ -1045,16 +1045,16 @@ mod tests {
         let _ = Strs::boxed(&badarr);
     }
 
-    /// A test util structure that returns `self.l` upon first 2 calls to `.borrow()`
+    /// A test util structure that returns `self.l` upon first 2 calls to `.as_ref()`
     /// and self.g from 3-rd.
-    struct MaliciousBorrow {
+    struct MaliciousAsRef {
         n: Cell<u8>,
         l: &'static str,
         g: &'static str,
     }
 
-    impl Borrow<str> for MaliciousBorrow {
-        fn borrow(&self) -> &str {
+    impl AsRef<str> for MaliciousAsRef {
+        fn as_ref(&self) -> &str {
             let val = self.n.get();
             // `required_words_for_and_size` is called in both `Strs::boxed`
             // and Strs::init_from_slice
