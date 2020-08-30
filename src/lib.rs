@@ -12,7 +12,12 @@ use core::{
     ptr, slice,
     str::Utf8Error,
 };
-use std::{process::abort, rc::Rc, sync::Arc};
+use std::{
+    process::abort,
+    rc::Rc,
+    sync::Arc,
+    error::Error
+};
 
 /// Collection of strings.
 ///
@@ -704,6 +709,24 @@ impl Clone for Box<Strs> {
         let _ = Box::into_raw(boxed);
         unsafe {
             Box::from_raw(ptr)
+        }
+    }
+}
+
+impl fmt::Display for FromSliceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::IndicesOrder => write!(f, "Indices are out of order"),
+            FromSliceError::NonUtf8 { offset, inner } => write!(f, "Data is not valid utf-8 at iffset {}: {}", offset, inner),
+        }
+    }
+}
+
+impl Error for FromSliceError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::IndicesOrder => None,
+            FromSliceError::NonUtf8 { offset: _, inner } => Some(inner),
         }
     }
 }
