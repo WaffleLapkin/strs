@@ -679,21 +679,7 @@ impl PartialOrd for Strs {
 
 impl Ord for Strs {
     fn cmp(&self, other: &Self) -> Ordering {
-        let mut left = self.iter();
-        let right = other.iter();
-
-        for (l, r) in left.by_ref().zip(right) {
-            // I wish we had or-patterns
-            if let ret @ Ordering::Less | ret @ Ordering::Greater = l.cmp(r) {
-                 return ret;
-            }
-        }
-
-        // The head of both iterators are equal, then bigger is the one that is bigger
-        match left.next() {
-            Some(_) => Ordering::Greater,
-            None => Ordering::Less,
-        }
+        self.iter().cmp(other.iter())
     }
 }
 
