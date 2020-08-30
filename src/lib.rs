@@ -494,6 +494,16 @@ impl Strs {
         Self::from_raw_parts(slice.as_ptr(), size)
     }
 
+    /// ## Safety
+    ///
+    /// No
+    pub unsafe fn from_slice_unchecked_mut(slice: &mut [usize]) -> &mut Self {
+        let len = slice[0];
+        let size = slice[len + 1] - slice[1]; // TODO: check if this works for empty
+
+        Self::from_raw_parts_mut(slice.as_mut_ptr(), size)
+    }
+
     /// Return space required for creating `Strs` from the given slice in **words**.
     ///
     /// That's it - to create `Strs` from `slice` you need a `&[usize]`-slice with
@@ -676,6 +686,24 @@ impl Hash for Strs {
     }
 }
 
+impl Clone for Box<Strs> {
+    fn clone(&self) -> Self {
+        let raw = self.as_raw();
+
+        // Allocate memory for copy
+        let mut boxed: Box<[usize]> = iter::repeat(0).take(raw.len()).collect();
+
+        // make bitwise copy
+        boxed.copy_from_slice(raw);
+
+        let ptr = unsafe { Strs::from_slice_unchecked_mut(&mut *boxed) as *mut Strs };
+        let _ = Box::into_raw(boxed);
+        unsafe {
+            Box::from_raw(ptr)
+        }
+    }
+}
+
 impl Strs {
     /// Creates `Strs` from raw parts.
     ///
@@ -743,6 +771,13 @@ impl Strs {
         // Invariants of the `Strs` guarantee that `buf` is filled from start with `len+1`
         // `usize`-indices, the caller guarantees that `idx < len`.
         (*ptr, *ptr.add(1))
+    }
+
+    fn as_raw(&self) -> &[usize] {
+        let length = 1 + ceiling_div(self.buf.len(), mem::size_of::<usize>());
+        unsafe {
+            slice::from_raw_parts(self as *const Strs as *const usize, length)
+        }
     }
 }
 
@@ -931,6 +966,15 @@ mod tests {
             format!("{:?}", Strs::boxed(&["42", "xir"])),
             "Strs { len: 2, strs: [\"42\", \"xir\"] }"
         );
+    }
+
+    #[test]
+    fn clone() {
+        let boxed = Strs::boxed(&["a"]);
+        assert_eq!(boxed.clone(), boxed);
+
+        let boxed = Strs::boxed::<&str>(&[]);
+        assert_eq!(boxed.clone(), boxed);
     }
 
     #[test]
