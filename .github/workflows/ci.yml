@@ -24,7 +24,7 @@ jobs:
           - rust: beta
             features: ""
           - rust: nightly
-            features: ""
+            features: "--all-features"
 
     steps:
       - uses: actions/checkout@v1
