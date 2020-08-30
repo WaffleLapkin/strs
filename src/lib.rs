@@ -2,8 +2,8 @@
 #![cfg_attr(feature = "nightly", feature(exact_size_is_empty))]
 //#![deny(missing_docs)] // TODO
 use core::{
-    convert::AsRef,
     cmp::Ordering,
+    convert::AsRef,
     fmt,
     hash::{Hash, Hasher},
     iter,
@@ -12,12 +12,7 @@ use core::{
     ptr, slice,
     str::Utf8Error,
 };
-use std::{
-    process::abort,
-    rc::Rc,
-    sync::Arc,
-    error::Error
-};
+use std::{error::Error, process::abort, rc::Rc, sync::Arc};
 
 /// Collection of strings.
 ///
@@ -707,9 +702,7 @@ impl Clone for Box<Strs> {
 
         let ptr = unsafe { Strs::from_slice_unchecked_mut(&mut *boxed) as *mut Strs };
         let _ = Box::into_raw(boxed);
-        unsafe {
-            Box::from_raw(ptr)
-        }
+        unsafe { Box::from_raw(ptr) }
     }
 }
 
@@ -717,7 +710,9 @@ impl fmt::Display for FromSliceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::IndicesOrder => write!(f, "Indices are out of order"),
-            FromSliceError::NonUtf8 { offset, inner } => write!(f, "Data is not valid utf-8 at iffset {}: {}", offset, inner),
+            FromSliceError::NonUtf8 { offset, inner } => {
+                write!(f, "Data is not valid utf-8 at iffset {}: {}", offset, inner)
+            }
         }
     }
 }
@@ -802,9 +797,7 @@ impl Strs {
 
     fn as_raw(&self) -> &[usize] {
         let length = 1 + ceiling_div(self.buf.len(), mem::size_of::<usize>());
-        unsafe {
-            slice::from_raw_parts(self as *const Strs as *const usize, length)
-        }
+        unsafe { slice::from_raw_parts(self as *const Strs as *const usize, length) }
     }
 }
 
@@ -906,8 +899,8 @@ pub(crate) fn malicious_as_ref(_n: u8) -> ! {
 mod tests {
     use crate::Strs;
     use core::mem::{self, MaybeUninit};
-    use std::convert::AsRef;
     use std::cell::Cell;
+    use std::convert::AsRef;
 
     #[test]
     fn from_vec() {
