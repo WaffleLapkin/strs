@@ -9,3 +9,7 @@ edition = "2018"
 [dependencies]
 
 [dev-dependencies]
+
+[features]
+default = []
+nightly = []

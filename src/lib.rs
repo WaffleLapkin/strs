@@ -1,14 +1,18 @@
 //! TODO: crate docs
+#![cfg_attr(feature = "nightly", feature(exact_size_is_empty))]
 //#![deny(missing_docs)] // TODO
 use core::{
-    borrow::Borrow,
+    cmp::Ordering,
+    convert::AsRef,
+    fmt,
+    hash::{Hash, Hasher},
     iter,
     mem::{self, transmute, MaybeUninit},
     ops::DerefMut,
     ptr, slice,
     str::Utf8Error,
 };
-use std::{process::abort, rc::Rc, sync::Arc};
+use std::{error::Error, process::abort, rc::Rc, sync::Arc};
 
 /// Collection of strings.
 ///
@@ -75,7 +79,6 @@ use std::{process::abort, rc::Rc, sync::Arc};
 /// [box]: Box
 /// [arc]: std::sync::Arc
 /// [rc]: std::rc::Rc
-#[derive(Debug)]
 #[repr(C)]
 pub struct Strs {
     /// Number of strings contained
@@ -128,7 +131,7 @@ impl Strs {
         }
     };
 
-    /// Creates `Arc<Strs>` from `&[S: Borrow<str>]`.
+    /// Creates `Arc<Strs>` from `&[S: AsRef<str>]`.
     ///
     /// ## Examples
     ///
@@ -145,7 +148,7 @@ impl Strs {
     /// assert_eq!(&arced[0], "Hello,");
     /// assert_eq!(&clone[2], "world");
     /// ```
-    pub fn arced<S: Borrow<str>>(slice: &[S]) -> Arc<Self> {
+    pub fn arced<S: AsRef<str>>(slice: &[S]) -> Arc<Self> {
         let req = Strs::required_words_for(slice);
 
         // Allocate required memory
@@ -174,7 +177,7 @@ impl Strs {
         unsafe { Arc::from_raw(strs) }
     }
 
-    /// Creates `Rc<Strs>` from `&[S: Borrow<str>]`.
+    /// Creates `Rc<Strs>` from `&[S: AsRef<str>]`.
     ///
     /// ## Examples
     ///
@@ -195,7 +198,7 @@ impl Strs {
     /// ## See also
     ///
     ///
-    pub fn rced<S: Borrow<str>>(slice: &[S]) -> Rc<Self> {
+    pub fn rced<S: AsRef<str>>(slice: &[S]) -> Rc<Self> {
         let req = Strs::required_words_for(slice);
 
         // Allocate required memory
@@ -222,7 +225,7 @@ impl Strs {
         unsafe { Rc::from_raw(strs) }
     }
 
-    /// Creates `Box<Strs>` from `&[S: Borrow<str>]`.
+    /// Creates `Box<Strs>` from `&[S: AsRef<str>]`.
     ///
     /// ## Examples
     ///
@@ -239,7 +242,7 @@ impl Strs {
     /// ## See also
     ///
     ///
-    pub fn boxed<S: Borrow<str>>(slice: &[S]) -> Box<Self> {
+    pub fn boxed<S: AsRef<str>>(slice: &[S]) -> Box<Self> {
         let req = Strs::required_words_for(slice);
 
         // Allocate required memory
@@ -326,6 +329,29 @@ impl Strs {
         //
         // We've just checked all invariants
         unsafe { Ok(Self::from_slice_unchecked(slice)) }
+    }
+
+    /// Returns an iterator over the strings in `Strs`.
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use strs::Strs;
+    ///
+    /// let strs = Strs::boxed(&["aaaa", "hahaha", "AAAAAAA"]);
+    /// let mut iter = strs.iter();
+    ///
+    /// assert_eq!(iter.next(), Some("aaaa"));
+    /// assert_eq!(iter.next_back(), Some("AAAAAAA"));
+    /// assert_eq!(iter.next(), Some("hahaha"));
+    /// assert_eq!(iter.next(), None);
+    /// ```
+    pub fn iter(&self) -> Iter {
+        Iter {
+            strs: self,
+            forth_idx: 0,
+            back_idx: self.len(),
+        }
     }
 
     /// View entire underling buffer as `&str`
@@ -468,16 +494,26 @@ impl Strs {
         Self::from_raw_parts(slice.as_ptr(), size)
     }
 
+    /// ## Safety
+    ///
+    /// No
+    pub unsafe fn from_slice_unchecked_mut(slice: &mut [usize]) -> &mut Self {
+        let len = slice[0];
+        let size = slice[len + 1] - slice[1]; // TODO: check if this works for empty
+
+        Self::from_raw_parts_mut(slice.as_mut_ptr(), size)
+    }
+
     /// Return space required for creating `Strs` from the given slice in **words**.
     ///
     /// That's it - to create `Strs` from `slice` you need a `&[usize]`-slice with
     /// `.len() == Strs::required_words_for(slice)`
-    pub fn required_words_for<T: Borrow<str>>(slice: &[T]) -> usize {
+    pub fn required_words_for<T: AsRef<str>>(slice: &[T]) -> usize {
         Self::required_words_for_and_size(slice).0
     }
 
-    fn required_words_for_and_size<T: Borrow<str>>(slice: &[T]) -> (usize, usize) {
-        let size: usize = slice.iter().map(|s| s.borrow().len()).sum();
+    fn required_words_for_and_size<T: AsRef<str>>(slice: &[T]) -> (usize, usize) {
+        let size: usize = slice.iter().map(|s| s.as_ref().len()).sum();
         let len = slice.len();
 
         // `len` field + indices + payload
@@ -507,7 +543,7 @@ impl Strs {
     ///
     ///
     #[track_caller]
-    pub fn init_from_slice<'t, S: Borrow<str>>(
+    pub fn init_from_slice<'t, S: AsRef<str>>(
         slice: &[S],
         target: &'t mut [MaybeUninit<usize>],
     ) -> &'t mut Self {
@@ -531,12 +567,12 @@ impl Strs {
         // offset from `buf_ptr` to the empty place
         let mut offset = indices * mem::size_of::<usize>();
         for (idx, s) in slice.iter().enumerate() {
-            let str = s.borrow();
+            let str = s.as_ref();
 
-            // Double check that we didn't run out of space because `S::borrow` may be
+            // Double check that we didn't run out of space because `S::as_ref` may be
             // malicious and return different strings upon calls (I wish it was pure...)
             if offset + str.len() > target_buf_bytes {
-                malicious_borrow(0)
+                malicious_as_ref(0)
             }
 
             unsafe {
@@ -559,9 +595,9 @@ impl Strs {
             let tail = target_buf_bytes - offset;
 
             // Double check that we've spent all space except last (usize-1)
-            // (yet again malicious `S::borrow`)
+            // (yet again malicious `S::as_ref`)
             if tail >= mem::size_of::<usize>() {
-                malicious_borrow(1)
+                malicious_as_ref(1)
             }
 
             // Fill/initialize the tail to guarantee that `target` is fully initialized
@@ -588,15 +624,105 @@ impl std::ops::Index<usize> for Strs {
     }
 }
 
-impl<S: Borrow<str>> From<Vec<S>> for Box<Strs> {
+impl<S: AsRef<str>> From<Vec<S>> for Box<Strs> {
     fn from(vec: Vec<S>) -> Self {
         vec.as_slice().into()
     }
 }
 
-impl<S: Borrow<str>> From<&[S]> for Box<Strs> {
+impl<S: AsRef<str>> From<&[S]> for Box<Strs> {
     fn from(slice: &[S]) -> Self {
         Strs::boxed(slice)
+    }
+}
+
+impl fmt::Debug for Strs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        struct Helper<'a>(&'a Strs);
+
+        impl fmt::Debug for Helper<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_list().entries(self.0.iter()).finish()
+            }
+        }
+
+        f.debug_struct("Strs")
+            .field("len", &self.len)
+            .field("strs", &Helper(self))
+            .finish()
+    }
+}
+
+/// Note: this borrows the whole underling string, same as [`Strs::as_str`]
+impl AsRef<str> for Strs {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl PartialEq for Strs {
+    fn eq(&self, other: &Self) -> bool {
+        // We use `as_raw` instead of `as_str` to compare indices too
+        //
+        // Also, we store the `len` at the beginning, so if lens are not equal this will fast-exit
+        self.as_raw() == other.as_raw()
+    }
+}
+
+impl Eq for Strs {}
+
+impl PartialOrd for Strs {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Strs {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.iter().cmp(other.iter())
+    }
+}
+
+impl Hash for Strs {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // Note: `as_raw` is used instead of `as_str` to hash indices and len too
+        self.as_raw().hash(state)
+    }
+}
+
+impl Clone for Box<Strs> {
+    fn clone(&self) -> Self {
+        let raw = self.as_raw();
+
+        // Allocate memory for copy
+        let mut boxed: Box<[usize]> = iter::repeat(0).take(raw.len()).collect();
+
+        // make bitwise copy
+        boxed.copy_from_slice(raw);
+
+        let ptr = unsafe { Strs::from_slice_unchecked_mut(&mut *boxed) as *mut Strs };
+        let _ = Box::into_raw(boxed);
+        unsafe { Box::from_raw(ptr) }
+    }
+}
+
+impl fmt::Display for FromSliceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::IndicesOrder => write!(f, "Indices are out of order"),
+            FromSliceError::NonUtf8 { offset, inner } => {
+                write!(f, "Data is not valid utf-8 at iffset {}: {}", offset, inner)
+            }
+        }
+    }
+}
+
+impl Error for FromSliceError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::IndicesOrder => None,
+            FromSliceError::NonUtf8 { offset: _, inner } => Some(inner),
+        }
     }
 }
 
@@ -668,6 +794,90 @@ impl Strs {
         // `usize`-indices, the caller guarantees that `idx < len`.
         (*ptr, *ptr.add(1))
     }
+
+    fn as_raw(&self) -> &[usize] {
+        let length = 1 + ceiling_div(self.buf.len(), mem::size_of::<usize>());
+        unsafe { slice::from_raw_parts(self as *const Strs as *const usize, length) }
+    }
+}
+
+/// Iterator over strings in [`Strs`]
+///
+/// See [`Strs::iter`]
+#[derive(Debug)]
+pub struct Iter<'a> {
+    strs: &'a Strs,
+    // TODO: probably it would be better to implement this with pointers to idx buffer
+    forth_idx: usize,
+    back_idx: usize,
+}
+
+impl<'a> Iterator for Iter<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.forth_idx == self.back_idx {
+            return None;
+        }
+
+        unsafe {
+            // ## Safety
+            //
+            // `forth_idx` is initialized with 0 and only increases,
+            // `bach_idx` is initialized with strs.len() and only decreases,
+            // If `forth_idx == back_idx` then they never change again.
+            //
+            // This means that 0 <= forth_idx < strs.len() and thus it's safe
+            let res = Some(self.strs.get_unchecked(self.forth_idx));
+            self.forth_idx += 1;
+            res
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.len();
+        (len, Some(len))
+    }
+}
+
+impl<'a> DoubleEndedIterator for Iter<'a> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.forth_idx == self.back_idx {
+            return None;
+        }
+
+        unsafe {
+            // ## Safety
+            //
+            // `forth_idx` is initialized with 0 and only increases,
+            // `bach_idx` is initialized with strs.len() and only decreases,
+            // If `forth_idx == back_idx` then they never change again.
+            //
+            // This means that 0 <= (back_idx - 1) < strs.len() and thus it's safe
+            self.back_idx -= 1;
+            Some(self.strs.get_unchecked(self.back_idx))
+        }
+    }
+}
+
+impl ExactSizeIterator for Iter<'_> {
+    fn len(&self) -> usize {
+        self.back_idx - self.forth_idx
+    }
+
+    #[cfg(feature = "nightly")]
+    fn is_empty(&self) -> bool {
+        self.back_idx == self.forth_idx
+    }
+}
+
+impl<'a> IntoIterator for &'a Strs {
+    type Item = &'a str;
+    type IntoIter = Iter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
 }
 
 pub(crate) fn ceiling_div(n: usize, d: usize) -> usize {
@@ -676,12 +886,12 @@ pub(crate) fn ceiling_div(n: usize, d: usize) -> usize {
 
 #[track_caller]
 #[cfg_attr(test, allow(unreachable_code))]
-pub(crate) fn malicious_borrow(_n: u8) -> ! {
-    // Panic in tests to test that we actually detect malicious borrows
+pub(crate) fn malicious_as_ref(_n: u8) -> ! {
+    // Panic in tests to test that we actually detect malicious `as_ref`s
     #[cfg(test)]
-    panic!("malicious S::borrow ({})", _n);
+    panic!("malicious S::as_ref ({})", _n);
 
-    // aborting because who the fuck are writing malicious `borrow`s???
+    // aborting because who the fuck are writing malicious `as_ref`s???
     abort()
 }
 
@@ -689,8 +899,8 @@ pub(crate) fn malicious_borrow(_n: u8) -> ! {
 mod tests {
     use crate::Strs;
     use core::mem::{self, MaybeUninit};
-    use std::borrow::Borrow;
     use std::cell::Cell;
+    use std::convert::AsRef;
 
     #[test]
     fn from_vec() {
@@ -739,6 +949,61 @@ mod tests {
     }
 
     #[test]
+    fn eq_neq() {
+        assert_eq!(Strs::boxed(&["axd", "FF"]), Strs::boxed(&["axd", "FF"]));
+        assert_ne!(Strs::boxed(&["X", ""]), Strs::boxed(&["", "X"]));
+    }
+
+    #[test]
+    fn iter() {
+        assert_eq!(Strs::EMPTY.iter().collect::<Vec<_>>(), Vec::<&str>::new());
+        assert_eq!(Strs::EMPTY.iter().len(), 0);
+
+        assert_eq!(
+            Strs::boxed(&["a", "b'", "ccc"]).iter().collect::<Vec<_>>(),
+            vec!["a", "b'", "ccc"]
+        );
+        assert_eq!(
+            Strs::boxed(&["x", "y", "z"])
+                .iter()
+                .rev()
+                .collect::<Vec<_>>(),
+            vec!["z", "y", "x"]
+        );
+
+        let strs = Strs::boxed(&["x", "y", "z", "a", "b"]);
+        let mut iter = strs.iter();
+        assert_eq!(iter.len(), 5);
+        assert_eq!(iter.next(), Some("x"));
+        assert_eq!(iter.next(), Some("y"));
+        assert_eq!(iter.next_back(), Some("b"));
+        assert_eq!(iter.len(), 2);
+        assert_eq!(iter.next(), Some("z"));
+        assert_eq!(iter.next_back(), Some("a"));
+        assert_eq!(iter.len(), 0);
+        assert_eq!(iter.next_back(), None);
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn debug() {
+        assert_eq!(format!("{:?}", Strs::EMPTY), "Strs { len: 0, strs: [] }");
+        assert_eq!(
+            format!("{:?}", Strs::boxed(&["42", "xir"])),
+            "Strs { len: 2, strs: [\"42\", \"xir\"] }"
+        );
+    }
+
+    #[test]
+    fn clone() {
+        let boxed = Strs::boxed(&["a"]);
+        assert_eq!(boxed.clone(), boxed);
+
+        let boxed = Strs::boxed::<&str>(&[]);
+        assert_eq!(boxed.clone(), boxed);
+    }
+
+    #[test]
     #[should_panic(expected = "assertion failed: `(left == right)`
   left: `4`,
  right: `3`: `target` is bigger or smaller that required for this operation")]
@@ -757,9 +1022,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "malicious S::borrow (0)")]
-    fn malicious_borrow_greater() {
-        let badarr = [MaliciousBorrow {
+    #[should_panic(expected = "malicious S::as_ref (0)")]
+    fn malicious_as_ref_greater() {
+        let badarr = [MaliciousAsRef {
             n: Cell::new(0),
             // lengths should differ such that
             // ceiling_div(l.len(), size_of::<usize>()) != ceiling_div(g.len(), size_of::<usize>())
@@ -770,9 +1035,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "malicious S::borrow (1)")]
-    fn malicious_borrow_less() {
-        let badarr = [MaliciousBorrow {
+    #[should_panic(expected = "malicious S::as_ref (1)")]
+    fn malicious_as_ref_less() {
+        let badarr = [MaliciousAsRef {
             n: Cell::new(0),
             // lengths should differ such that
             // ceiling_div(l.len(), size_of::<usize>()) != ceiling_div(g.len(), size_of::<usize>())
@@ -782,16 +1047,16 @@ mod tests {
         let _ = Strs::boxed(&badarr);
     }
 
-    /// A test util structure that returns `self.l` upon first 2 calls to `.borrow()`
+    /// A test util structure that returns `self.l` upon first 2 calls to `.as_ref()`
     /// and self.g from 3-rd.
-    struct MaliciousBorrow {
+    struct MaliciousAsRef {
         n: Cell<u8>,
         l: &'static str,
         g: &'static str,
     }
 
-    impl Borrow<str> for MaliciousBorrow {
-        fn borrow(&self) -> &str {
+    impl AsRef<str> for MaliciousAsRef {
+        fn as_ref(&self) -> &str {
             let val = self.n.get();
             // `required_words_for_and_size` is called in both `Strs::boxed`
             // and Strs::init_from_slice
