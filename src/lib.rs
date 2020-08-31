@@ -1,5 +1,6 @@
 //! TODO: crate docs
 #![cfg_attr(feature = "nightly", feature(exact_size_is_empty))]
+#![warn(clippy::missing_inline_in_public_items, clippy::inline_always)]
 //#![deny(missing_docs)] // TODO
 use core::{
     cmp::Ordering,
@@ -148,6 +149,9 @@ impl Strs {
     /// assert_eq!(&arced[0], "Hello,");
     /// assert_eq!(&clone[2], "world");
     /// ```
+    // The function is pretty big, involves allocations, expected to be cold
+    // and thus probably shouldn't be inlined
+    #[allow(clippy::missing_inline_in_public_items)]
     pub fn arced<S: AsRef<str>>(slice: &[S]) -> Arc<Self> {
         let req = Strs::required_words_for(slice);
 
@@ -198,6 +202,9 @@ impl Strs {
     /// ## See also
     ///
     ///
+    // The function is pretty big, involves allocations, expected to be cold
+    // and thus probably shouldn't be inlined
+    #[allow(clippy::missing_inline_in_public_items)]
     pub fn rced<S: AsRef<str>>(slice: &[S]) -> Rc<Self> {
         let req = Strs::required_words_for(slice);
 
@@ -242,6 +249,9 @@ impl Strs {
     /// ## See also
     ///
     ///
+    // The function is pretty big, involves allocations, expected to be cold
+    // and thus probably shouldn't be inlined
+    #[allow(clippy::missing_inline_in_public_items)]
     pub fn boxed<S: AsRef<str>>(slice: &[S]) -> Box<Self> {
         let req = Strs::required_words_for(slice);
 
@@ -298,6 +308,7 @@ impl Strs {
     /// assert_eq!(&strs[0], "Hello ");
     /// assert_eq!(&strs[1], "world");
     /// ```
+    #[inline]
     pub fn from_slice(slice: &[usize]) -> Result<&Self, FromSliceError> {
         let len = slice[0];
         let (_, buf, _) = unsafe { slice[1..].align_to::<u8>() };
@@ -346,6 +357,7 @@ impl Strs {
     /// assert_eq!(iter.next(), Some("hahaha"));
     /// assert_eq!(iter.next(), None);
     /// ```
+    #[inline]
     pub fn iter(&self) -> Iter {
         Iter {
             strs: self,
@@ -365,6 +377,7 @@ impl Strs {
     ///
     /// assert_eq!(s.as_str(), "Hello, world!");
     /// ```
+    #[inline]
     pub fn as_str(&self) -> &str {
         unsafe {
             // At the start of the buf there are `len+1` usizes, so the strings start from
@@ -387,6 +400,7 @@ impl Strs {
     /// assert_eq!(s.len(), 3);
     /// assert_eq!(Strs::EMPTY.len(), 0);
     /// ```
+    #[inline]
     pub fn len(&self) -> usize {
         self.len
     }
@@ -403,6 +417,7 @@ impl Strs {
     /// assert_eq!(s.is_empty(), false);
     /// assert_eq!(Strs::EMPTY.is_empty(), true);
     /// ```
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
@@ -422,6 +437,7 @@ impl Strs {
     /// assert_eq!(s.get(1), Some("x"));
     /// assert_eq!(s.get(2), None);
     /// ```
+    #[inline]
     pub fn get(&self, idx: usize) -> Option<&str> {
         if self.len() > idx {
             // ## Safety
@@ -467,6 +483,7 @@ impl Strs {
     /// // The output is not used, but it's UB anyway
     /// unsafe { s.get_unchecked(2); }
     /// ```
+    #[inline]
     pub unsafe fn get_unchecked(&self, idx: usize) -> &str {
         // ## Safety
         //
@@ -487,6 +504,7 @@ impl Strs {
     /// ## Safety
     ///
     /// No
+    #[inline]
     pub unsafe fn from_slice_unchecked(slice: &[usize]) -> &Self {
         let len = slice[0];
         let size = slice[len + 1] - slice[1]; // TODO: check if this works for empty
@@ -497,6 +515,7 @@ impl Strs {
     /// ## Safety
     ///
     /// No
+    #[inline]
     pub unsafe fn from_slice_unchecked_mut(slice: &mut [usize]) -> &mut Self {
         let len = slice[0];
         let size = slice[len + 1] - slice[1]; // TODO: check if this works for empty
@@ -508,6 +527,7 @@ impl Strs {
     ///
     /// That's it - to create `Strs` from `slice` you need a `&[usize]`-slice with
     /// `.len() == Strs::required_words_for(slice)`
+    #[inline]
     pub fn required_words_for<T: AsRef<str>>(slice: &[T]) -> usize {
         Self::required_words_for_and_size(slice).0
     }
@@ -542,7 +562,9 @@ impl Strs {
     /// ## Panics
     ///
     ///
+    ///
     #[track_caller]
+    #[allow(clippy::missing_inline_in_public_items)]
     pub fn init_from_slice<'t, S: AsRef<str>>(
         slice: &[S],
         target: &'t mut [MaybeUninit<usize>],
@@ -611,6 +633,7 @@ impl Strs {
 impl std::ops::Index<usize> for Strs {
     type Output = str;
 
+    #[inline]
     #[track_caller]
     fn index(&self, idx: usize) -> &str {
         match self.get(idx) {
@@ -625,18 +648,21 @@ impl std::ops::Index<usize> for Strs {
 }
 
 impl<S: AsRef<str>> From<Vec<S>> for Box<Strs> {
+    #[inline]
     fn from(vec: Vec<S>) -> Self {
         vec.as_slice().into()
     }
 }
 
 impl<S: AsRef<str>> From<&[S]> for Box<Strs> {
+    #[inline]
     fn from(slice: &[S]) -> Self {
         Strs::boxed(slice)
     }
 }
 
 impl fmt::Debug for Strs {
+    #[allow(clippy::missing_inline_in_public_items)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         struct Helper<'a>(&'a Strs);
 
@@ -655,12 +681,14 @@ impl fmt::Debug for Strs {
 
 /// Note: this borrows the whole underling string, same as [`Strs::as_str`]
 impl AsRef<str> for Strs {
+    #[inline]
     fn as_ref(&self) -> &str {
         self.as_str()
     }
 }
 
 impl PartialEq for Strs {
+    #[inline]
     fn eq(&self, other: &Self) -> bool {
         // We use `as_raw` instead of `as_str` to compare indices too
         //
@@ -672,18 +700,21 @@ impl PartialEq for Strs {
 impl Eq for Strs {}
 
 impl PartialOrd for Strs {
+    #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
 impl Ord for Strs {
+    #[inline]
     fn cmp(&self, other: &Self) -> Ordering {
         self.iter().cmp(other.iter())
     }
 }
 
 impl Hash for Strs {
+    #[inline]
     fn hash<H: Hasher>(&self, state: &mut H) {
         // Note: `as_raw` is used instead of `as_str` to hash indices and len too
         self.as_raw().hash(state)
@@ -691,6 +722,7 @@ impl Hash for Strs {
 }
 
 impl Clone for Box<Strs> {
+    #[inline]
     fn clone(&self) -> Self {
         let raw = self.as_raw();
 
@@ -707,6 +739,7 @@ impl Clone for Box<Strs> {
 }
 
 impl fmt::Display for FromSliceError {
+    #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::IndicesOrder => write!(f, "Indices are out of order"),
@@ -718,6 +751,7 @@ impl fmt::Display for FromSliceError {
 }
 
 impl Error for FromSliceError {
+    #[inline]
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::IndicesOrder => None,
@@ -815,6 +849,7 @@ pub struct Iter<'a> {
 impl<'a> Iterator for Iter<'a> {
     type Item = &'a str;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         if self.forth_idx == self.back_idx {
             return None;
@@ -834,6 +869,7 @@ impl<'a> Iterator for Iter<'a> {
         }
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         let len = self.len();
         (len, Some(len))
@@ -841,6 +877,7 @@ impl<'a> Iterator for Iter<'a> {
 }
 
 impl<'a> DoubleEndedIterator for Iter<'a> {
+    #[inline]
     fn next_back(&mut self) -> Option<Self::Item> {
         if self.forth_idx == self.back_idx {
             return None;
@@ -861,10 +898,12 @@ impl<'a> DoubleEndedIterator for Iter<'a> {
 }
 
 impl ExactSizeIterator for Iter<'_> {
+    #[inline]
     fn len(&self) -> usize {
         self.back_idx - self.forth_idx
     }
 
+    #[inline]
     #[cfg(feature = "nightly")]
     fn is_empty(&self) -> bool {
         self.back_idx == self.forth_idx
@@ -875,17 +914,20 @@ impl<'a> IntoIterator for &'a Strs {
     type Item = &'a str;
     type IntoIter = Iter<'a>;
 
+    #[inline]
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
     }
 }
 
+#[inline]
 pub(crate) fn ceiling_div(n: usize, d: usize) -> usize {
     (n / d) + ((n % d != 0) as usize)
 }
 
 #[track_caller]
 #[cfg_attr(test, allow(unreachable_code))]
+#[inline(never)]
 pub(crate) fn malicious_as_ref(_n: u8) -> ! {
     // Panic in tests to test that we actually detect malicious `as_ref`s
     #[cfg(test)]
