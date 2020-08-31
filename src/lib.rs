@@ -11,7 +11,7 @@ use core::{
     mem::{self, transmute, MaybeUninit},
     ops::DerefMut,
     ptr, slice,
-    str::Utf8Error,
+    str::{self, Utf8Error},
 };
 use std::{error::Error, process::abort, rc::Rc, sync::Arc};
 
@@ -614,14 +614,14 @@ impl Strs {
         }
 
         unsafe {
-            let tail = target_buf_bytes - offset;
-
-            // Double check that we've spent all space except last (usize-1)
+            // Double check that we've written exactly as many bytes as we've expected
             // (yet again malicious `S::as_ref`)
-            if tail >= mem::size_of::<usize>() {
+            let size_written = offset - indices * mem::size_of::<usize>();
+            if size_written != size {
                 malicious_as_ref(1)
             }
 
+            let tail = target_buf_bytes - offset;
             // Fill/initialize the tail to guarantee that `target` is fully initialized
             ptr::write_bytes(buf_ptr.add(offset), 0, tail);
         }
@@ -1063,13 +1063,12 @@ mod tests {
         let _ = Strs::init_from_slice(&["x"], &mut *uninit);
     }
 
+    /// Try to write a lot more, than expected (panic while writing)
     #[test]
     #[should_panic(expected = "malicious S::as_ref (0)")]
     fn malicious_as_ref_greater() {
         let badarr = [MaliciousAsRef {
             n: Cell::new(0),
-            // lengths should differ such that
-            // ceiling_div(l.len(), size_of::<usize>()) != ceiling_div(g.len(), size_of::<usize>())
             l: "a",
             g: "bbbbbbbbb",
         }];
@@ -1081,9 +1080,40 @@ mod tests {
     fn malicious_as_ref_less() {
         let badarr = [MaliciousAsRef {
             n: Cell::new(0),
-            // lengths should differ such that
-            // ceiling_div(l.len(), size_of::<usize>()) != ceiling_div(g.len(), size_of::<usize>())
             l: "aaaaaaaaa",
+            g: "b",
+        }];
+        let _ = Strs::boxed(&badarr);
+    }
+
+    #[test]
+    #[should_panic(expected = "malicious S::as_ref (1)")]
+    fn malicious_as_ref_greater_small_diff_but_not_char_boundary() {
+        let badarr = [MaliciousAsRef {
+            n: Cell::new(0),
+            l: "a",
+            g: "ä",
+        }];
+        let _ = Strs::boxed(&badarr);
+    }
+
+    #[test]
+    #[should_panic(expected = "malicious S::as_ref (1)")]
+    fn malicious_as_ref_greater_small_diff() {
+        let badarr = [MaliciousAsRef {
+            n: Cell::new(0),
+            l: "a",
+            g: "bb",
+        }];
+        let _ = Strs::boxed(&badarr);
+    }
+
+    #[test]
+    #[should_panic(expected = "malicious S::as_ref (1)")]
+    fn malicious_as_ref_less_small_diff() {
+        let badarr = [MaliciousAsRef {
+            n: Cell::new(0),
+            l: "aaa",
             g: "b",
         }];
         let _ = Strs::boxed(&badarr);
