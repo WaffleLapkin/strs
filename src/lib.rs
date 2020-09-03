@@ -54,8 +54,15 @@ pub use trusted_idx::TrustedIdx;
 /// - `u32` (not on 16 bit platforms)
 /// - `usize`
 ///
-/// The smaller you shooce the `Idx` the smaller would be memory overhead, but ne avare that maximum
+/// The smaller you shooce the `Idx` the smaller would be memory overhead, but be aware that maximum
 /// capacity would be smaller too.
+///
+/// More preciesly `uN` can store `2^N - (N/8)` _bytes_ where overhead for every string is `N/8`
+/// bytes. i.e. `Strs<u8>` can store `(2^8 - (8/8)) / (8/8) = 255` empty strings or
+/// `(2^8 - 1) / (1 + 14) = 17` strings with len 14, `Strs<16>` can store
+/// `(2^16 - (16/8)) / (16/8) = 32767` empty strings or `(2^16 - 2) / (2 + 14) ~= 4095` strings with
+/// len 14. However note that this highly depends on the implementation and may potentially change
+/// in future.
 ///
 /// Also note that sometimes rustc can't infer the type of `Idx` so you need to provide it
 /// explicitly:

@@ -8,16 +8,22 @@ use crate::Strs;
 
 /// Represents a type that can be used in [`Strs`](crate::Strs) as `Idx`.
 ///
+/// Note: This trait is `sealed` because it's unlikely to be correctly implemented outside of this
+/// crate.
+///
 /// ## Safety
 ///
-/// Ugh, just don't implement this trait
+/// Ugh, just don't implement this trait.
+///
+/// Safety of [`Strs`] **highly** depends on this trait in many ways. Basically it requires
+/// `impl TrustedIdx` to be std-unsigned-integer not bigger than `usize`.
 pub unsafe trait TrustedIdx:
     Copy + Eq + Ord + Add<Output = Self> + Sub<Output = Self> + private::Sealed + 'static
 {
-    /// Zero (`0`)
+    /// Zero (`0`), additive identity
     const ZERO: Self;
 
-    /// One (`1`)
+    /// One (`1`), multiplicative identity
     const ONE: Self;
 
     /// Helper for implementing `Strs::EMPTY`
