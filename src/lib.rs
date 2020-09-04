@@ -3,22 +3,28 @@
 #![warn(clippy::missing_inline_in_public_items, clippy::inline_always)]
 //#![deny(missing_docs)] // TODO
 
+use crate::int::TrustedIdx;
 use core::{
     cmp::Ordering,
     convert::AsRef,
     fmt,
     hash::{Hash, Hasher},
-    iter,
+    iter::repeat,
     mem::{self, MaybeUninit},
     ops::DerefMut,
     ptr, slice,
     str::{self, Utf8Error},
 };
-use std::{error::Error, process::abort, rc::Rc, sync::Arc};
+use std::{process::abort, rc::Rc, sync::Arc};
 
+mod error;
+mod iter;
 mod trusted_idx;
 
-pub use trusted_idx::TrustedIdx;
+/// Mostly **int**ernal, yet `pub`lic things.
+pub mod int;
+
+pub use {error::FromSliceError, iter::Iter};
 
 /// Collection of strings.
 ///
@@ -143,12 +149,6 @@ pub struct Strs<Idx: TrustedIdx = u16> {
     buf: [u8],
 }
 
-#[derive(Debug)]
-pub enum FromSliceError {
-    IndicesOrder,
-    NonUtf8 { offset: usize, inner: Utf8Error },
-}
-
 impl<Idx: TrustedIdx> Strs<Idx> {
     /// Empty [`Strs`] e.i. [`Strs`] that doesn't contain any strings
     ///
@@ -193,8 +193,7 @@ impl<Idx: TrustedIdx> Strs<Idx> {
         // this is as performant, as the nightly methods
         //
         // [^0]: https://godbolt.org/z/43b8Kz
-        let mut arc: Arc<[MaybeUninit<Idx>]> =
-            iter::repeat(MaybeUninit::uninit()).take(req).collect();
+        let mut arc: Arc<[MaybeUninit<Idx>]> = repeat(MaybeUninit::uninit()).take(req).collect();
 
         let target = Arc::get_mut(&mut arc).expect("just created, not cloned");
 
@@ -246,8 +245,7 @@ impl<Idx: TrustedIdx> Strs<Idx> {
         // this is as performant, as the nightly methods
         //
         // [^0]: https://godbolt.org/z/43b8Kz
-        let mut rc: Rc<[MaybeUninit<Idx>]> =
-            iter::repeat(MaybeUninit::uninit()).take(req).collect();
+        let mut rc: Rc<[MaybeUninit<Idx>]> = repeat(MaybeUninit::uninit()).take(req).collect();
 
         let target = Rc::get_mut(&mut rc).expect("just created, not cloned");
 
@@ -293,8 +291,7 @@ impl<Idx: TrustedIdx> Strs<Idx> {
         // this is as performant, as the nightly methods
         //
         // [^0]: https://godbolt.org/z/43b8Kz
-        let mut boxed: Box<[MaybeUninit<Idx>]> =
-            iter::repeat(MaybeUninit::uninit()).take(req).collect();
+        let mut boxed: Box<[MaybeUninit<Idx>]> = repeat(MaybeUninit::uninit()).take(req).collect();
 
         // Initialize `Strs` in place
         let strs = Strs::init_from_slice(slice, boxed.deref_mut()) as *mut Strs<Idx>;
@@ -391,11 +388,7 @@ impl<Idx: TrustedIdx> Strs<Idx> {
     /// ```
     #[inline]
     pub fn iter(&self) -> Iter<Idx> {
-        Iter {
-            strs: self,
-            forth_idx: Idx::ZERO,
-            back_idx: self.len(),
-        }
+        Iter::new(self)
     }
 
     /// View entire underling buffer as `&str`
@@ -767,7 +760,7 @@ impl<Idx: TrustedIdx> Clone for Box<Strs<Idx>> {
         let raw = self.as_raw();
 
         // Allocate memory for copy
-        let mut boxed: Box<[Idx]> = iter::repeat(Idx::ZERO).take(raw.len()).collect();
+        let mut boxed: Box<[Idx]> = repeat(Idx::ZERO).take(raw.len()).collect();
 
         // make bitwise copy
         boxed.copy_from_slice(raw);
@@ -775,28 +768,6 @@ impl<Idx: TrustedIdx> Clone for Box<Strs<Idx>> {
         let ptr = unsafe { Strs::from_slice_unchecked_mut(&mut *boxed) as *mut Strs<Idx> };
         let _ = Box::into_raw(boxed);
         unsafe { Box::from_raw(ptr) }
-    }
-}
-
-impl fmt::Display for FromSliceError {
-    #[inline]
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::IndicesOrder => write!(f, "Indices are out of order"),
-            FromSliceError::NonUtf8 { offset, inner } => {
-                write!(f, "Data is not valid utf-8 at iffset {}: {}", offset, inner)
-            }
-        }
-    }
-}
-
-impl Error for FromSliceError {
-    #[inline]
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::IndicesOrder => None,
-            FromSliceError::NonUtf8 { offset: _, inner } => Some(inner),
-        }
     }
 }
 
@@ -872,81 +843,6 @@ impl<Idx: TrustedIdx> Strs<Idx> {
     fn as_raw(&self) -> &[Idx] {
         let length = 1 + ceiling_div(self.buf.len(), mem::size_of::<Idx>());
         unsafe { slice::from_raw_parts(self as *const Strs<Idx> as *const Idx, length) }
-    }
-}
-
-/// Iterator over strings in [`Strs`]
-///
-/// See [`Strs::iter`]
-#[derive(Debug)]
-pub struct Iter<'a, Idx: TrustedIdx> {
-    strs: &'a Strs<Idx>,
-    // TODO: probably it would be better to implement this with pointers to idx buffer
-    forth_idx: Idx,
-    back_idx: Idx,
-}
-
-impl<'a, Idx: TrustedIdx> Iterator for Iter<'a, Idx> {
-    type Item = &'a str;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.forth_idx == self.back_idx {
-            return None;
-        }
-
-        unsafe {
-            // ## Safety
-            //
-            // `forth_idx` is initialized with 0 and only increases,
-            // `bach_idx` is initialized with strs.len() and only decreases,
-            // If `forth_idx == back_idx` then they never change again.
-            //
-            // This means that 0 <= forth_idx < strs.len() and thus it's safe
-            let res = Some(self.strs.get_unchecked(self.forth_idx));
-            self.forth_idx = self.forth_idx + Idx::ONE;
-            res
-        }
-    }
-
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let len = self.len();
-        (len, Some(len))
-    }
-}
-
-impl<'a, Idx: TrustedIdx> DoubleEndedIterator for Iter<'a, Idx> {
-    #[inline]
-    fn next_back(&mut self) -> Option<Self::Item> {
-        if self.forth_idx == self.back_idx {
-            return None;
-        }
-
-        unsafe {
-            // ## Safety
-            //
-            // `forth_idx` is initialized with 0 and only increases,
-            // `bach_idx` is initialized with strs.len() and only decreases,
-            // If `forth_idx == back_idx` then they never change again.
-            //
-            // This means that 0 <= (back_idx - 1) < strs.len() and thus it's safe
-            self.back_idx.dec();
-            Some(self.strs.get_unchecked(self.back_idx))
-        }
-    }
-}
-
-impl<Idx: TrustedIdx> ExactSizeIterator for Iter<'_, Idx> {
-    #[inline]
-    fn len(&self) -> usize {
-        (self.back_idx - self.forth_idx).as_usize()
-    }
-
-    #[inline]
-    #[cfg(feature = "nightly")]
-    fn is_empty(&self) -> bool {
-        self.back_idx == self.forth_idx
     }
 }
 
@@ -1035,39 +931,6 @@ mod tests {
     fn eq_neq() {
         assert_eq!(<Strs>::boxed(&["axd", "FF"]), Strs::boxed(&["axd", "FF"]));
         assert_ne!(<Strs>::boxed(&["X", ""]), Strs::boxed(&["", "X"]));
-    }
-
-    #[test]
-    fn iter() {
-        assert_eq!(<Strs>::EMPTY.iter().collect::<Vec<_>>(), Vec::<&str>::new());
-        assert_eq!(<Strs>::EMPTY.iter().len(), 0);
-
-        assert_eq!(
-            <Strs>::boxed(&["a", "b'", "ccc"])
-                .iter()
-                .collect::<Vec<_>>(),
-            vec!["a", "b'", "ccc"]
-        );
-        assert_eq!(
-            <Strs>::boxed(&["x", "y", "z"])
-                .iter()
-                .rev()
-                .collect::<Vec<_>>(),
-            vec!["z", "y", "x"]
-        );
-
-        let strs = <Strs>::boxed(&["x", "y", "z", "a", "b"]);
-        let mut iter = strs.iter();
-        assert_eq!(iter.len(), 5);
-        assert_eq!(iter.next(), Some("x"));
-        assert_eq!(iter.next(), Some("y"));
-        assert_eq!(iter.next_back(), Some("b"));
-        assert_eq!(iter.len(), 2);
-        assert_eq!(iter.next(), Some("z"));
-        assert_eq!(iter.next_back(), Some("a"));
-        assert_eq!(iter.len(), 0);
-        assert_eq!(iter.next_back(), None);
-        assert_eq!(iter.next(), None);
     }
 
     #[test]
