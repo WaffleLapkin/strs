@@ -2,18 +2,23 @@
 #![cfg_attr(feature = "nightly", feature(exact_size_is_empty))]
 #![warn(clippy::missing_inline_in_public_items, clippy::inline_always)]
 //#![deny(missing_docs)] // TODO
+
 use core::{
     cmp::Ordering,
     convert::AsRef,
     fmt,
     hash::{Hash, Hasher},
     iter,
-    mem::{self, transmute, MaybeUninit},
+    mem::{self, MaybeUninit},
     ops::DerefMut,
     ptr, slice,
     str::{self, Utf8Error},
 };
 use std::{error::Error, process::abort, rc::Rc, sync::Arc};
+
+mod trusted_idx;
+
+pub use trusted_idx::TrustedIdx;
 
 /// Collection of strings.
 ///
@@ -26,8 +31,8 @@ use std::{error::Error, process::abort, rc::Rc, sync::Arc};
 ///
 /// The main use case for this struct is collections of strings those are once created and then
 /// don't change. This allows to occupy less space in comparison with `[String]` (slice of strings
-/// takes 3 words per string of overhead whereas `Strs` _currently_ takes 2 words per string +
-/// 1 word in any case). Additionally this removes 1 level of indirection because all string are
+/// takes 3 words per string of overhead whereas `Strs` _currently_ takes 1 `Idx` per string +
+/// 2 `Idx` in any case). Additionally this removes 1 level of indirection because all string are
 /// contained inline.
 ///
 /// `Rc` and `Arc` wrapped `Strs`es are particularly useful due to cheap cloning.
@@ -36,11 +41,54 @@ use std::{error::Error, process::abort, rc::Rc, sync::Arc};
 /// [`boxed`]: Strs::boxed
 /// [`arced`]: Strs::arced
 /// [`rced`]: Strs::rced
+/// [box]: Box
+/// [arc]: std::sync::Arc
+/// [rc]: std::rc::Rc
 ///
+/// ## `<Idx>`
+///
+/// `Strs` is parametrized by `Idx` generic. It is used to store indices & len. `Idx` can be any
+/// std-unsigned-integer that is not bigger than `usize`, i.e:
+/// - `u8`
+/// - `u16` (default)
+/// - `u32` (not on 16 bit platforms)
+/// - `usize`
+///
+/// The smaller you shooce the `Idx` the smaller would be memory overhead, but be aware that maximum
+/// capacity would be smaller too.
+///
+/// More preciesly `uN` can store `2^N - (N/8)` _bytes_ where overhead for every string is `N/8`
+/// bytes. i.e. `Strs<u8>` can store `(2^8 - (8/8)) / (8/8) = 255` empty strings or
+/// `(2^8 - 1) / (1 + 14) = 17` strings with len 14, `Strs<16>` can store
+/// `(2^16 - (16/8)) / (16/8) = 32767` empty strings or `(2^16 - 2) / (2 + 14) ~= 4095` strings with
+/// len 14. However note that this highly depends on the implementation and may potentially change
+/// in future.
+///
+/// Also note that sometimes rustc can't infer the type of `Idx` so you need to provide it
+/// explicitly:
+///
+/// ```compile_fail
+/// use strs::Strs;
+///
+/// // Rustc can't infer type, it's compiler error детка
+/// let _ = Strs::boxed(&[""]);
+/// ```
+///
+/// ```
+/// use strs::Strs;
+///
+/// // Use default (u16)
+/// let _ = <Strs>::boxed(&[""]);
+/// // Explicit
+/// let _ = Strs::<u16>::boxed(&[""]);
+/// let _ = Strs::<u32>::boxed(&[""]);
+/// // Even more explicit
+/// let _: Box<Strs<usize>> = Strs::boxed(&[""]);
+/// ```
 ///
 /// ## Examples
 ///
-///
+/// // TODO
 ///
 /// ## Benchmarks
 ///
@@ -76,23 +124,21 @@ use std::{error::Error, process::abort, rc::Rc, sync::Arc};
 ///       }
 ///   }
 ///   ```
-///
-/// [box]: Box
-/// [arc]: std::sync::Arc
-/// [rc]: std::rc::Rc
 #[repr(C)]
-pub struct Strs {
+pub struct Strs<Idx: TrustedIdx = u16> {
     /// Number of strings contained
-    len: usize,
+    // Note: for Idx = un, Strs<Idx> may not contain more than 2.pow(n)/size_of::<un>() - size_of::<un>()
+    //       elements, that is always less than maximum number representable in un
+    len: Idx,
     /// ## Invariants
     ///
-    /// 1. `buf[..(len + 1) * size_of::<usize>()]` is valid `[usize]` i.e
+    /// 1. `buf[..(len + 1) * size_of::<Idx>()]` is valid `[Idx]` i.e
     ///   ```ignore
-    ///   buf[..(len + 1) * core::mem::size_of::<usize>()].align_to::<usize>()
+    ///   buf[..(len + 1) * core::mem::size_of::<Idx>()].align_to::<Idx>()
     ///   ```
-    ///   Returns `([], xs, [])` where `xs` is a `usize` slice
+    ///   Returns `([], xs, [])` where `xs` is a `Idx` slice
     ///   - `xs` must be sorted such that `xs[n] <= xs[n + 1]`
-    /// 2. `buf[(len + 1) * size_of::<usize>()..]` is valid utf-8 string
+    /// 2. `buf[(len + 1) * size_of::<Idx>()..]` is valid utf-8 string
     /// 3. `buf[x..y]` such that `x, y ∈ indices` and `x <= y` is also valid utf-8 string
     buf: [u8],
 }
@@ -103,34 +149,20 @@ pub enum FromSliceError {
     NonUtf8 { offset: usize, inner: Utf8Error },
 }
 
-impl Strs {
+impl<Idx: TrustedIdx> Strs<Idx> {
     /// Empty [`Strs`] e.i. [`Strs`] that doesn't contain any strings
     ///
     /// ```
     /// use strs::Strs;
     ///
-    /// assert_eq!(Strs::EMPTY.len(), 0);
-    /// assert_eq!(Strs::EMPTY.get(0), None);
-    /// assert_eq!(Strs::EMPTY.as_str(), "");
+    /// # // <> around Strs are intentional, w/o rustc can't infer `Idx` type
+    /// assert_eq!(<Strs>::EMPTY.len(), 0);
+    /// assert_eq!(<Strs>::EMPTY.get(0), None);
+    /// assert_eq!(<Strs>::EMPTY.as_str(), "");
     /// ```
-    pub const EMPTY: &'static Strs = {
-        #[repr(C)]
-        struct Coerce<T: ?Sized> {
-            len: usize,
-            buf: T,
-        }
-
-        let coerce: &Coerce<[u8]> = &Coerce {
-            len: 0,
-            buf: 0usize.to_ne_bytes(),
-        };
-
-        // TODO: safety
-        #[allow(clippy::transmute_ptr_to_ptr)] // you can't dereference ptr in consts :|
-        unsafe {
-            transmute::<&Coerce<[u8]>, &Strs>(coerce)
-        }
-    };
+    // using here a const from `Idx` because we can't use generics in consts without Freeze
+    // see https://github.com/rust-lang/rfcs/pull/2944#issuecomment-685087090
+    pub const EMPTY: &'static Self = Idx::EMPTY_STRS;
 
     /// Creates `Arc<Strs>` from `&[S: AsRef<str>]`.
     ///
@@ -153,7 +185,7 @@ impl Strs {
     // and thus probably shouldn't be inlined
     #[allow(clippy::missing_inline_in_public_items)]
     pub fn arced<S: AsRef<str>>(slice: &[S]) -> Arc<Self> {
-        let req = Strs::required_words_for(slice);
+        let req = Self::required_idxes_for(slice);
 
         // Allocate required memory
         //
@@ -161,13 +193,13 @@ impl Strs {
         // this is as performant, as the nightly methods
         //
         // [^0]: https://godbolt.org/z/43b8Kz
-        let mut arc: Arc<[MaybeUninit<usize>]> =
+        let mut arc: Arc<[MaybeUninit<Idx>]> =
             iter::repeat(MaybeUninit::uninit()).take(req).collect();
 
         let target = Arc::get_mut(&mut arc).expect("just created, not cloned");
 
         // Initialize `Strs` in place
-        let strs = Strs::init_from_slice(slice, target) as *mut Strs;
+        let strs = Strs::init_from_slice(slice, target) as *mut Strs<Idx>;
 
         Arc::into_raw(arc);
 
@@ -176,8 +208,8 @@ impl Strs {
         //
         // `init_from_slice` guarantees that it has written `Strs` to the target.
         //
-        // `Strs` has the same layout as `[usize]` (e.i.: it won't be UB to dealloc memory with
-        // `Strs` layout if it was allocated with `[usize]` layout)
+        // `Strs` has the same layout as `[Idx]` (e.i.: it won't be UB to dealloc memory with
+        // `Strs` layout if it was allocated with `[Idx]` layout)
         unsafe { Arc::from_raw(strs) }
     }
 
@@ -206,7 +238,7 @@ impl Strs {
     // and thus probably shouldn't be inlined
     #[allow(clippy::missing_inline_in_public_items)]
     pub fn rced<S: AsRef<str>>(slice: &[S]) -> Rc<Self> {
-        let req = Strs::required_words_for(slice);
+        let req = Self::required_idxes_for(slice);
 
         // Allocate required memory
         //
@@ -214,21 +246,21 @@ impl Strs {
         // this is as performant, as the nightly methods
         //
         // [^0]: https://godbolt.org/z/43b8Kz
-        let mut rc: Rc<[MaybeUninit<usize>]> =
+        let mut rc: Rc<[MaybeUninit<Idx>]> =
             iter::repeat(MaybeUninit::uninit()).take(req).collect();
 
         let target = Rc::get_mut(&mut rc).expect("just created, not cloned");
 
         // Initialize `Strs` in place
-        let strs = Strs::init_from_slice(slice, target) as *mut Strs;
+        let strs = Strs::init_from_slice(slice, target) as *mut Strs<Idx>;
 
         let _ = Rc::into_raw(rc);
         // ## Safety
         //
         // `init_from_slice` guarantees that it has written `Strs` to the target.
         //
-        // `Strs` has the same layout as `[usize]` (e.i.: it won't be UB to dealloc memory with
-        // `Strs` layout if it was allocated with `[usize]` layout)
+        // `Strs` has the same layout as `[Idx]` (e.i.: it won't be UB to dealloc memory with
+        // `Strs` layout if it was allocated with `[Idx]` layout)
         unsafe { Rc::from_raw(strs) }
     }
 
@@ -253,7 +285,7 @@ impl Strs {
     // and thus probably shouldn't be inlined
     #[allow(clippy::missing_inline_in_public_items)]
     pub fn boxed<S: AsRef<str>>(slice: &[S]) -> Box<Self> {
-        let req = Strs::required_words_for(slice);
+        let req = Self::required_idxes_for(slice);
 
         // Allocate required memory
         //
@@ -261,11 +293,11 @@ impl Strs {
         // this is as performant, as the nightly methods
         //
         // [^0]: https://godbolt.org/z/43b8Kz
-        let mut boxed: Box<[MaybeUninit<usize>]> =
+        let mut boxed: Box<[MaybeUninit<Idx>]> =
             iter::repeat(MaybeUninit::uninit()).take(req).collect();
 
         // Initialize `Strs` in place
-        let strs = Strs::init_from_slice(slice, boxed.deref_mut()) as *mut Strs;
+        let strs = Strs::init_from_slice(slice, boxed.deref_mut()) as *mut Strs<Idx>;
 
         // Forget
         Box::into_raw(boxed);
@@ -275,8 +307,8 @@ impl Strs {
         // `init_from_slice` guarantees that returned reference is the same as input
         // (i.e.: it's the same allocation, etc).
         //
-        // `Strs` has the same layout as `[usize]` (e.i.: it won't be UB to dealloc memory with
-        // `Strs` layout if it was allocated with `[usize]` layout)
+        // `Strs` has the same layout as `[Idx]` (e.i.: it won't be UB to dealloc memory with
+        // `Strs` layout if it was allocated with `[Idx]` layout)
         unsafe { Box::from_raw(strs) }
     }
 
@@ -309,22 +341,22 @@ impl Strs {
     /// assert_eq!(&strs[1], "world");
     /// ```
     #[inline]
-    pub fn from_slice(slice: &[usize]) -> Result<&Self, FromSliceError> {
-        let len = slice[0];
+    pub fn from_slice(slice: &[Idx]) -> Result<&Self, FromSliceError> {
+        let len = slice[0].as_usize();
         let (_, buf, _) = unsafe { slice[1..].align_to::<u8>() };
         let indices = &slice[1..len + 2];
 
         // Result<&str, Utf8Error> -> Result<(), CoerceError>
         let utferr = |res: Result<&str, Utf8Error>| {
             res.map(drop).map_err(|err| FromSliceError::NonUtf8 {
-                offset: len * core::mem::size_of::<usize>(),
+                offset: len * core::mem::size_of::<Idx>(),
                 inner: err,
             })
         };
 
         // Check invariant: end of the buf is valid utf8 string
         utferr(core::str::from_utf8(
-            &buf[(len + 1) * core::mem::size_of::<usize>()..],
+            &buf[(len + 1) * core::mem::size_of::<Idx>()..],
         ))?;
 
         // Check invariants:
@@ -332,7 +364,7 @@ impl Strs {
         // - all parts are valid utf8 strings
         indices.windows(2).try_for_each(|s| match s {
             [a, b] if a > b => Err(FromSliceError::IndicesOrder),
-            &[a, b] => utferr(core::str::from_utf8(&buf[a..b])),
+            &[a, b] => utferr(core::str::from_utf8(&buf[a.as_usize()..b.as_usize()])),
             _ => Ok(()), // Unreachable
         })?;
 
@@ -349,7 +381,7 @@ impl Strs {
     /// ```
     /// use strs::Strs;
     ///
-    /// let strs = Strs::boxed(&["aaaa", "hahaha", "AAAAAAA"]);
+    /// let strs = Strs::<u16>::boxed(&["aaaa", "hahaha", "AAAAAAA"]);
     /// let mut iter = strs.iter();
     ///
     /// assert_eq!(iter.next(), Some("aaaa"));
@@ -358,10 +390,10 @@ impl Strs {
     /// assert_eq!(iter.next(), None);
     /// ```
     #[inline]
-    pub fn iter(&self) -> Iter {
+    pub fn iter(&self) -> Iter<Idx> {
         Iter {
             strs: self,
-            forth_idx: 0,
+            forth_idx: Idx::ZERO,
             back_idx: self.len(),
         }
     }
@@ -380,8 +412,8 @@ impl Strs {
     #[inline]
     pub fn as_str(&self) -> &str {
         unsafe {
-            // At the start of the buf there are `len+1` usizes, so the strings start from
-            let lower = mem::size_of::<usize>() * self.len + mem::size_of::<usize>();
+            // At the start of the buf there are `len+1` idxes, so the strings start from
+            let lower = mem::size_of::<Idx>() * self.len.as_usize() + mem::size_of::<Idx>();
 
             let bytes = &self.buf[lower..];
             core::str::from_utf8_unchecked(bytes)
@@ -398,10 +430,10 @@ impl Strs {
     /// let s = Box::<Strs>::from(vec!["", "abs", "x"]);
     ///
     /// assert_eq!(s.len(), 3);
-    /// assert_eq!(Strs::EMPTY.len(), 0);
+    /// assert_eq!(<Strs>::EMPTY.len(), 0);
     /// ```
     #[inline]
-    pub fn len(&self) -> usize {
+    pub fn len(&self) -> Idx {
         self.len
     }
 
@@ -415,11 +447,11 @@ impl Strs {
     /// let s = Box::<Strs>::from(vec![""]);
     ///
     /// assert_eq!(s.is_empty(), false);
-    /// assert_eq!(Strs::EMPTY.is_empty(), true);
+    /// assert_eq!(<Strs>::EMPTY.is_empty(), true);
     /// ```
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.len == Idx::ZERO
     }
 
     /// Returns a reference to an `idx`th element string.
@@ -438,7 +470,7 @@ impl Strs {
     /// assert_eq!(s.get(2), None);
     /// ```
     #[inline]
-    pub fn get(&self, idx: usize) -> Option<&str> {
+    pub fn get(&self, idx: Idx) -> Option<&str> {
         if self.len() > idx {
             // ## Safety
             //
@@ -484,7 +516,7 @@ impl Strs {
     /// unsafe { s.get_unchecked(2); }
     /// ```
     #[inline]
-    pub unsafe fn get_unchecked(&self, idx: usize) -> &str {
+    pub unsafe fn get_unchecked(&self, idx: Idx) -> &str {
         // ## Safety
         //
         // caller guarantees that idx is inbounds
@@ -505,8 +537,8 @@ impl Strs {
     ///
     /// No
     #[inline]
-    pub unsafe fn from_slice_unchecked(slice: &[usize]) -> &Self {
-        let len = slice[0];
+    pub unsafe fn from_slice_unchecked(slice: &[Idx]) -> &Self {
+        let len = slice[0].as_usize();
         let size = slice[len + 1] - slice[1]; // TODO: check if this works for empty
 
         Self::from_raw_parts(slice.as_ptr(), size)
@@ -516,28 +548,28 @@ impl Strs {
     ///
     /// No
     #[inline]
-    pub unsafe fn from_slice_unchecked_mut(slice: &mut [usize]) -> &mut Self {
-        let len = slice[0];
+    pub unsafe fn from_slice_unchecked_mut(slice: &mut [Idx]) -> &mut Self {
+        let len = slice[0].as_usize();
         let size = slice[len + 1] - slice[1]; // TODO: check if this works for empty
 
         Self::from_raw_parts_mut(slice.as_mut_ptr(), size)
     }
 
-    /// Return space required for creating `Strs` from the given slice in **words**.
+    /// Return space required for creating `Strs` from the given slice in **idxes**.
     ///
-    /// That's it - to create `Strs` from `slice` you need a `&[usize]`-slice with
-    /// `.len() == Strs::required_words_for(slice)`
+    /// That's it - to create `Strs` from `slice` you need a `&[Idx]`-slice with
+    /// `.len() == Strs::required_idxes_for(slice)`
     #[inline]
-    pub fn required_words_for<T: AsRef<str>>(slice: &[T]) -> usize {
-        Self::required_words_for_and_size(slice).0
+    pub fn required_idxes_for<T: AsRef<str>>(slice: &[T]) -> usize {
+        Self::required_idxes_for_and_size(slice).0
     }
 
-    fn required_words_for_and_size<T: AsRef<str>>(slice: &[T]) -> (usize, usize) {
+    fn required_idxes_for_and_size<T: AsRef<str>>(slice: &[T]) -> (usize, usize) {
         let size: usize = slice.iter().map(|s| s.as_ref().len()).sum();
         let len = slice.len();
 
         // `len` field + indices + payload
-        let req = 1 + (len + 1) + ceiling_div(size, mem::size_of::<usize>());
+        let req = 1 + (len + 1) + ceiling_div(size, mem::size_of::<Idx>());
         (req, size)
     }
 
@@ -567,9 +599,9 @@ impl Strs {
     #[allow(clippy::missing_inline_in_public_items)]
     pub fn init_from_slice<'t, S: AsRef<str>>(
         slice: &[S],
-        target: &'t mut [MaybeUninit<usize>],
+        target: &'t mut [MaybeUninit<Idx>],
     ) -> &'t mut Self {
-        let (required_words, size) = Self::required_words_for_and_size(slice);
+        let (required_words, size) = Self::required_idxes_for_and_size(slice);
         let len = slice.len();
         let indices = len + 1;
 
@@ -581,13 +613,13 @@ impl Strs {
         );
 
         // write `len` field
-        target[0] = MaybeUninit::new(len);
+        target[0] = MaybeUninit::new(Idx::from_usize(len));
 
         let buf_ptr = unsafe { target.as_mut_ptr().offset(1).cast::<u8>() };
-        let target_buf_bytes = (target.len() - 1) * mem::size_of::<usize>();
+        let target_buf_bytes = (target.len() - 1) * mem::size_of::<Idx>();
 
         // offset from `buf_ptr` to the empty place
-        let mut offset = indices * mem::size_of::<usize>();
+        let mut offset = indices * mem::size_of::<Idx>();
         for (idx, s) in slice.iter().enumerate() {
             let str = s.as_ref();
 
@@ -598,7 +630,10 @@ impl Strs {
             }
 
             unsafe {
-                buf_ptr.cast::<usize>().add(idx).write(offset);
+                buf_ptr
+                    .cast::<Idx>()
+                    .add(idx)
+                    .write(Idx::from_usize(offset));
             }
 
             // ## Safety
@@ -610,13 +645,16 @@ impl Strs {
         }
 
         unsafe {
-            buf_ptr.cast::<usize>().add(indices - 1).write(offset);
+            buf_ptr
+                .cast::<Idx>()
+                .add(indices - 1)
+                .write(Idx::from_usize(offset));
         }
 
         unsafe {
             // Double check that we've written exactly as many bytes as we've expected
             // (yet again malicious `S::as_ref`)
-            let size_written = offset - indices * mem::size_of::<usize>();
+            let size_written = offset - indices * mem::size_of::<Idx>();
             if size_written != size {
                 malicious_as_ref(1)
             }
@@ -626,16 +664,18 @@ impl Strs {
             ptr::write_bytes(buf_ptr.add(offset), 0, tail);
         }
 
-        unsafe { Self::from_raw_parts_mut(target.as_mut_ptr().cast::<usize>(), size) }
+        unsafe {
+            Self::from_raw_parts_mut(target.as_mut_ptr().cast::<Idx>(), Idx::from_usize(size))
+        }
     }
 }
 
-impl std::ops::Index<usize> for Strs {
+impl<Idx: TrustedIdx + fmt::Display> std::ops::Index<Idx> for Strs<Idx> {
     type Output = str;
 
     #[inline]
     #[track_caller]
-    fn index(&self, idx: usize) -> &str {
+    fn index(&self, idx: Idx) -> &str {
         match self.get(idx) {
             Some(ret) => ret,
             None => panic!(
@@ -647,26 +687,26 @@ impl std::ops::Index<usize> for Strs {
     }
 }
 
-impl<S: AsRef<str>> From<Vec<S>> for Box<Strs> {
+impl<Idx: TrustedIdx, S: AsRef<str>> From<Vec<S>> for Box<Strs<Idx>> {
     #[inline]
     fn from(vec: Vec<S>) -> Self {
         vec.as_slice().into()
     }
 }
 
-impl<S: AsRef<str>> From<&[S]> for Box<Strs> {
+impl<Idx: TrustedIdx, S: AsRef<str>> From<&[S]> for Box<Strs<Idx>> {
     #[inline]
     fn from(slice: &[S]) -> Self {
         Strs::boxed(slice)
     }
 }
 
-impl fmt::Debug for Strs {
+impl<Idx: TrustedIdx + fmt::Debug> fmt::Debug for Strs<Idx> {
     #[allow(clippy::missing_inline_in_public_items)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        struct Helper<'a>(&'a Strs);
+        struct Helper<'a, Idx: TrustedIdx>(&'a Strs<Idx>);
 
-        impl fmt::Debug for Helper<'_> {
+        impl<Idx: TrustedIdx> fmt::Debug for Helper<'_, Idx> {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 f.debug_list().entries(self.0.iter()).finish()
             }
@@ -680,14 +720,14 @@ impl fmt::Debug for Strs {
 }
 
 /// Note: this borrows the whole underling string, same as [`Strs::as_str`]
-impl AsRef<str> for Strs {
+impl<Idx: TrustedIdx> AsRef<str> for Strs<Idx> {
     #[inline]
     fn as_ref(&self) -> &str {
         self.as_str()
     }
 }
 
-impl PartialEq for Strs {
+impl<Idx: TrustedIdx> PartialEq for Strs<Idx> {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
         // We use `as_raw` instead of `as_str` to compare indices too
@@ -697,23 +737,23 @@ impl PartialEq for Strs {
     }
 }
 
-impl Eq for Strs {}
+impl<Idx: TrustedIdx> Eq for Strs<Idx> {}
 
-impl PartialOrd for Strs {
+impl<Idx: TrustedIdx> PartialOrd for Strs<Idx> {
     #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for Strs {
+impl<Idx: TrustedIdx> Ord for Strs<Idx> {
     #[inline]
     fn cmp(&self, other: &Self) -> Ordering {
         self.iter().cmp(other.iter())
     }
 }
 
-impl Hash for Strs {
+impl<Idx: TrustedIdx + Hash> Hash for Strs<Idx> {
     #[inline]
     fn hash<H: Hasher>(&self, state: &mut H) {
         // Note: `as_raw` is used instead of `as_str` to hash indices and len too
@@ -721,18 +761,18 @@ impl Hash for Strs {
     }
 }
 
-impl Clone for Box<Strs> {
+impl<Idx: TrustedIdx> Clone for Box<Strs<Idx>> {
     #[inline]
     fn clone(&self) -> Self {
         let raw = self.as_raw();
 
         // Allocate memory for copy
-        let mut boxed: Box<[usize]> = iter::repeat(0).take(raw.len()).collect();
+        let mut boxed: Box<[Idx]> = iter::repeat(Idx::ZERO).take(raw.len()).collect();
 
         // make bitwise copy
         boxed.copy_from_slice(raw);
 
-        let ptr = unsafe { Strs::from_slice_unchecked_mut(&mut *boxed) as *mut Strs };
+        let ptr = unsafe { Strs::from_slice_unchecked_mut(&mut *boxed) as *mut Strs<Idx> };
         let _ = Box::into_raw(boxed);
         unsafe { Box::from_raw(ptr) }
     }
@@ -760,7 +800,7 @@ impl Error for FromSliceError {
     }
 }
 
-impl Strs {
+impl<Idx: TrustedIdx> Strs<Idx> {
     /// Creates `Strs` from raw parts.
     ///
     /// `ptr` - pointer to the start of the struct, `len` - number of strings contained,
@@ -769,16 +809,17 @@ impl Strs {
     /// ## Safety
     ///
     /// - Caller need to ensure invariants of [`slice::from_raw_parts`][slice_parts] on
-    ///   len: `size + (len + 1) * mem::size_of::<usize>()`
+    ///   len: `size + (len + 1) * mem::size_of::<Idx>()`
     /// - It's [ub] to not ensure invariants described in [`from_slice`].
     ///
     /// [slice_parts]: core::slice::from_raw_parts
     /// [ub]: https://doc.rust-lang.org/reference/behavior-considered-undefined.html
-    unsafe fn from_raw_parts<'a>(ptr: *const usize, size: usize) -> &'a Self {
+    unsafe fn from_raw_parts<'a>(ptr: *const Idx, size: Idx) -> &'a Self {
         let len = *ptr;
 
-        let length = size + (len + 1) * mem::size_of::<usize>();
-        let ptr = slice::from_raw_parts(ptr.cast::<()>(), length) as *const [()] as *const Strs;
+        let length = size.as_usize() + (len.as_usize() + 1) * mem::size_of::<Idx>();
+        let ptr =
+            slice::from_raw_parts(ptr.cast::<()>(), length) as *const [()] as *const Strs<Idx>;
 
         &*ptr
     }
@@ -794,11 +835,12 @@ impl Strs {
     ///
     /// [slice_parts]: core::slice::from_raw_parts_mut
     /// [ub]: https://doc.rust-lang.org/reference/behavior-considered-undefined.html
-    unsafe fn from_raw_parts_mut<'a>(ptr: *mut usize, size: usize) -> &'a mut Self {
+    unsafe fn from_raw_parts_mut<'a>(ptr: *mut Idx, size: Idx) -> &'a mut Self {
         let len = *ptr;
 
-        let length = size + (len + 1) * mem::size_of::<usize>();
-        let ptr = slice::from_raw_parts_mut(ptr.cast::<()>(), length) as *mut [()] as *mut Strs;
+        let length = size.as_usize() + (len.as_usize() + 1) * mem::size_of::<Idx>();
+        let ptr =
+            slice::from_raw_parts_mut(ptr.cast::<()>(), length) as *mut [()] as *mut Strs<Idx>;
 
         &mut *ptr
     }
@@ -814,24 +856,24 @@ impl Strs {
     /// ## Safety
     ///
     /// The caller must ensure that `len < idx`
-    unsafe fn get_bounds(&self, idx: usize) -> (usize, usize) {
+    unsafe fn get_bounds(&self, idx: Idx) -> (usize, usize) {
         let ptr = self
             .buf
             .as_ptr()
-            .cast::<usize>()
+            .cast::<Idx>()
             // Safety guaranteed by the caller
-            .add(idx);
+            .add(idx.as_usize());
 
         // ## Safety
         //
         // Invariants of the `Strs` guarantee that `buf` is filled from start with `len+1`
         // `usize`-indices, the caller guarantees that `idx < len`.
-        (*ptr, *ptr.add(1))
+        ((*ptr).as_usize(), (*ptr.add(1)).as_usize())
     }
 
-    fn as_raw(&self) -> &[usize] {
-        let length = 1 + ceiling_div(self.buf.len(), mem::size_of::<usize>());
-        unsafe { slice::from_raw_parts(self as *const Strs as *const usize, length) }
+    fn as_raw(&self) -> &[Idx] {
+        let length = 1 + ceiling_div(self.buf.len(), mem::size_of::<Idx>());
+        unsafe { slice::from_raw_parts(self as *const Strs<Idx> as *const Idx, length) }
     }
 }
 
@@ -839,14 +881,14 @@ impl Strs {
 ///
 /// See [`Strs::iter`]
 #[derive(Debug)]
-pub struct Iter<'a> {
-    strs: &'a Strs,
+pub struct Iter<'a, Idx: TrustedIdx> {
+    strs: &'a Strs<Idx>,
     // TODO: probably it would be better to implement this with pointers to idx buffer
-    forth_idx: usize,
-    back_idx: usize,
+    forth_idx: Idx,
+    back_idx: Idx,
 }
 
-impl<'a> Iterator for Iter<'a> {
+impl<'a, Idx: TrustedIdx> Iterator for Iter<'a, Idx> {
     type Item = &'a str;
 
     #[inline]
@@ -864,7 +906,7 @@ impl<'a> Iterator for Iter<'a> {
             //
             // This means that 0 <= forth_idx < strs.len() and thus it's safe
             let res = Some(self.strs.get_unchecked(self.forth_idx));
-            self.forth_idx += 1;
+            self.forth_idx = self.forth_idx + Idx::ONE;
             res
         }
     }
@@ -876,7 +918,7 @@ impl<'a> Iterator for Iter<'a> {
     }
 }
 
-impl<'a> DoubleEndedIterator for Iter<'a> {
+impl<'a, Idx: TrustedIdx> DoubleEndedIterator for Iter<'a, Idx> {
     #[inline]
     fn next_back(&mut self) -> Option<Self::Item> {
         if self.forth_idx == self.back_idx {
@@ -891,16 +933,16 @@ impl<'a> DoubleEndedIterator for Iter<'a> {
             // If `forth_idx == back_idx` then they never change again.
             //
             // This means that 0 <= (back_idx - 1) < strs.len() and thus it's safe
-            self.back_idx -= 1;
+            self.back_idx.dec();
             Some(self.strs.get_unchecked(self.back_idx))
         }
     }
 }
 
-impl ExactSizeIterator for Iter<'_> {
+impl<Idx: TrustedIdx> ExactSizeIterator for Iter<'_, Idx> {
     #[inline]
     fn len(&self) -> usize {
-        self.back_idx - self.forth_idx
+        (self.back_idx - self.forth_idx).as_usize()
     }
 
     #[inline]
@@ -910,9 +952,9 @@ impl ExactSizeIterator for Iter<'_> {
     }
 }
 
-impl<'a> IntoIterator for &'a Strs {
+impl<'a, Idx: TrustedIdx> IntoIterator for &'a Strs<Idx> {
     type Item = &'a str;
-    type IntoIter = Iter<'a>;
+    type IntoIter = Iter<'a, Idx>;
 
     #[inline]
     fn into_iter(self) -> Self::IntoIter {
@@ -939,6 +981,7 @@ pub(crate) fn malicious_as_ref(_n: u8) -> ! {
 
 #[cfg(test)]
 mod tests {
+    //use crate::Strs;
     use crate::Strs;
     use core::mem::{self, MaybeUninit};
     use std::cell::Cell;
@@ -967,17 +1010,17 @@ mod tests {
 
     #[test]
     fn tail_is_initialized() {
-        let mut uninit = box_new_uninit_slice(Strs::required_words_for(&["x"]));
+        let mut uninit = box_new_uninit_slice(<Strs>::required_idxes_for(&["x"]));
 
-        let _ = Strs::init_from_slice(&["x"], &mut *uninit);
+        let _ = <Strs>::init_from_slice(&["x"], &mut *uninit);
 
-        let mut tail = [0; mem::size_of::<usize>()];
+        let mut tail = [0; mem::size_of::<u16>()];
         tail[0] = b'x';
         let buf = [
             1,
-            mem::size_of::<usize>() * 2,
-            mem::size_of::<usize>() * 2 + 1,
-            usize::from_ne_bytes(tail),
+            (mem::size_of::<u16>() * 2) as u16,
+            (mem::size_of::<u16>() * 2 + 1) as u16,
+            u16::from_ne_bytes(tail),
         ];
 
         unsafe {
@@ -987,33 +1030,35 @@ mod tests {
 
     #[test]
     fn from_empty_str() {
-        let _ = Strs::boxed(&[""]);
+        let _ = <Strs>::boxed(&[""]);
     }
 
     #[test]
     fn eq_neq() {
-        assert_eq!(Strs::boxed(&["axd", "FF"]), Strs::boxed(&["axd", "FF"]));
-        assert_ne!(Strs::boxed(&["X", ""]), Strs::boxed(&["", "X"]));
+        assert_eq!(<Strs>::boxed(&["axd", "FF"]), Strs::boxed(&["axd", "FF"]));
+        assert_ne!(<Strs>::boxed(&["X", ""]), Strs::boxed(&["", "X"]));
     }
 
     #[test]
     fn iter() {
-        assert_eq!(Strs::EMPTY.iter().collect::<Vec<_>>(), Vec::<&str>::new());
-        assert_eq!(Strs::EMPTY.iter().len(), 0);
+        assert_eq!(<Strs>::EMPTY.iter().collect::<Vec<_>>(), Vec::<&str>::new());
+        assert_eq!(<Strs>::EMPTY.iter().len(), 0);
 
         assert_eq!(
-            Strs::boxed(&["a", "b'", "ccc"]).iter().collect::<Vec<_>>(),
+            <Strs>::boxed(&["a", "b'", "ccc"])
+                .iter()
+                .collect::<Vec<_>>(),
             vec!["a", "b'", "ccc"]
         );
         assert_eq!(
-            Strs::boxed(&["x", "y", "z"])
+            <Strs>::boxed(&["x", "y", "z"])
                 .iter()
                 .rev()
                 .collect::<Vec<_>>(),
             vec!["z", "y", "x"]
         );
 
-        let strs = Strs::boxed(&["x", "y", "z", "a", "b"]);
+        let strs = <Strs>::boxed(&["x", "y", "z", "a", "b"]);
         let mut iter = strs.iter();
         assert_eq!(iter.len(), 5);
         assert_eq!(iter.next(), Some("x"));
@@ -1029,19 +1074,19 @@ mod tests {
 
     #[test]
     fn debug() {
-        assert_eq!(format!("{:?}", Strs::EMPTY), "Strs { len: 0, strs: [] }");
+        assert_eq!(format!("{:?}", <Strs>::EMPTY), "Strs { len: 0, strs: [] }");
         assert_eq!(
-            format!("{:?}", Strs::boxed(&["42", "xir"])),
+            format!("{:?}", <Strs>::boxed(&["42", "xir"])),
             "Strs { len: 2, strs: [\"42\", \"xir\"] }"
         );
     }
 
     #[test]
     fn clone() {
-        let boxed = Strs::boxed(&["a"]);
+        let boxed = <Strs>::boxed(&["a"]);
         assert_eq!(boxed.clone(), boxed);
 
-        let boxed = Strs::boxed::<&str>(&[]);
+        let boxed = <Strs>::boxed::<&str>(&[]);
         assert_eq!(boxed.clone(), boxed);
     }
 
@@ -1050,8 +1095,8 @@ mod tests {
   left: `4`,
  right: `3`: `target` is bigger or smaller that required for this operation")]
     fn not_enough_space() {
-        let mut uninit = box_new_uninit_slice(Strs::required_words_for(&["x"]) - 1);
-        let _ = Strs::init_from_slice(&["x"], &mut *uninit);
+        let mut uninit = box_new_uninit_slice(<Strs>::required_idxes_for(&["x"]) - 1);
+        let _ = <Strs>::init_from_slice(&["x"], &mut *uninit);
     }
 
     #[test]
@@ -1059,8 +1104,8 @@ mod tests {
   left: `4`,
  right: `5`: `target` is bigger or smaller that required for this operation")]
     fn too_much_space() {
-        let mut uninit = box_new_uninit_slice(Strs::required_words_for(&["x"]) + 1);
-        let _ = Strs::init_from_slice(&["x"], &mut *uninit);
+        let mut uninit = box_new_uninit_slice(<Strs>::required_idxes_for(&["x"]) + 1);
+        let _ = <Strs>::init_from_slice(&["x"], &mut *uninit);
     }
 
     /// Try to write a lot more, than expected (panic while writing)
@@ -1072,7 +1117,7 @@ mod tests {
             l: "a",
             g: "bbbbbbbbb",
         }];
-        let _ = Strs::boxed(&badarr);
+        let _ = <Strs>::boxed(&badarr);
     }
 
     #[test]
@@ -1083,7 +1128,7 @@ mod tests {
             l: "aaaaaaaaa",
             g: "b",
         }];
-        let _ = Strs::boxed(&badarr);
+        let _ = <Strs>::boxed(&badarr);
     }
 
     #[test]
@@ -1094,7 +1139,7 @@ mod tests {
             l: "a",
             g: "ä",
         }];
-        let _ = Strs::boxed(&badarr);
+        let _ = <Strs>::boxed(&badarr);
     }
 
     #[test]
@@ -1105,7 +1150,7 @@ mod tests {
             l: "a",
             g: "bb",
         }];
-        let _ = Strs::boxed(&badarr);
+        let _ = <Strs>::boxed(&badarr);
     }
 
     #[test]
@@ -1116,7 +1161,7 @@ mod tests {
             l: "aaa",
             g: "b",
         }];
-        let _ = Strs::boxed(&badarr);
+        let _ = <Strs>::boxed(&badarr);
     }
 
     /// A test util structure that returns `self.l` upon first 2 calls to `.as_ref()`
@@ -1142,13 +1187,13 @@ mod tests {
     }
 
     // stable analog for Box::new_uninit_slice
-    fn box_new_uninit_slice(req: usize) -> Box<[MaybeUninit<usize>]> {
+    fn box_new_uninit_slice<T: Copy>(req: usize) -> Box<[MaybeUninit<T>]> {
         core::iter::repeat(MaybeUninit::uninit())
             .take(req)
             .collect()
     }
 
-    unsafe fn box_assume_init(this: Box<[MaybeUninit<usize>]>) -> Box<[usize]> {
-        Box::from_raw(Box::into_raw(this) as *mut [usize])
+    unsafe fn box_assume_init<T>(this: Box<[MaybeUninit<T>]>) -> Box<[T]> {
+        Box::from_raw(Box::into_raw(this) as *mut [T])
     }
 }
