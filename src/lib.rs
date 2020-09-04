@@ -818,8 +818,7 @@ impl<Idx: TrustedIdx> Strs<Idx> {
         let len = *ptr;
 
         let length = size.as_usize() + (len.as_usize() + 1) * mem::size_of::<Idx>();
-        let ptr =
-            slice::from_raw_parts(ptr.cast::<()>(), length) as *const [()] as *const Strs<Idx>;
+        let ptr = ptr::slice_from_raw_parts(ptr.cast::<()>(), length) as *const Strs<Idx>;
 
         &*ptr
     }
@@ -839,8 +838,7 @@ impl<Idx: TrustedIdx> Strs<Idx> {
         let len = *ptr;
 
         let length = size.as_usize() + (len.as_usize() + 1) * mem::size_of::<Idx>();
-        let ptr =
-            slice::from_raw_parts_mut(ptr.cast::<()>(), length) as *mut [()] as *mut Strs<Idx>;
+        let ptr = ptr::slice_from_raw_parts_mut(ptr.cast::<()>(), length) as *mut Strs<Idx>;
 
         &mut *ptr
     }
