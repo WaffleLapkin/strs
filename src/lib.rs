@@ -3,7 +3,6 @@
 #![warn(clippy::missing_inline_in_public_items, clippy::inline_always)]
 //#![deny(missing_docs)] // TODO
 
-use crate::int::TrustedIdx;
 use core::{
     cmp::Ordering,
     convert::AsRef,
@@ -16,6 +15,8 @@ use core::{
     str::{self, Utf8Error},
 };
 use std::{process::abort, rc::Rc, sync::Arc};
+
+use crate::int::{Source, TrustedIdx};
 
 mod error;
 mod iter;
@@ -185,7 +186,7 @@ impl<Idx: TrustedIdx> Strs<Idx> {
     // and thus probably shouldn't be inlined
     #[allow(clippy::missing_inline_in_public_items)]
     pub fn arced<S: AsRef<str>>(slice: &[S]) -> Arc<Self> {
-        let req = Self::required_idxes_for(slice);
+        let src = Source::new(slice);
 
         // Allocate required memory
         //
@@ -193,12 +194,14 @@ impl<Idx: TrustedIdx> Strs<Idx> {
         // this is as performant, as the nightly methods
         //
         // [^0]: https://godbolt.org/z/43b8Kz
-        let mut arc: Arc<[MaybeUninit<Idx>]> = repeat(MaybeUninit::uninit()).take(req).collect();
+        let mut arc: Arc<[MaybeUninit<Idx>]> = repeat(MaybeUninit::uninit())
+            .take(src.required_idxes())
+            .collect();
 
         let target = Arc::get_mut(&mut arc).expect("just created, not cloned");
 
         // Initialize `Strs` in place
-        let strs = Strs::init_from_slice(slice, target) as *mut Strs<Idx>;
+        let strs = Strs::init_from_slice(src, target) as *mut Strs<Idx>;
 
         Arc::into_raw(arc);
 
@@ -237,7 +240,7 @@ impl<Idx: TrustedIdx> Strs<Idx> {
     // and thus probably shouldn't be inlined
     #[allow(clippy::missing_inline_in_public_items)]
     pub fn rced<S: AsRef<str>>(slice: &[S]) -> Rc<Self> {
-        let req = Self::required_idxes_for(slice);
+        let src = Source::new(slice);
 
         // Allocate required memory
         //
@@ -245,12 +248,14 @@ impl<Idx: TrustedIdx> Strs<Idx> {
         // this is as performant, as the nightly methods
         //
         // [^0]: https://godbolt.org/z/43b8Kz
-        let mut rc: Rc<[MaybeUninit<Idx>]> = repeat(MaybeUninit::uninit()).take(req).collect();
+        let mut rc: Rc<[MaybeUninit<Idx>]> = repeat(MaybeUninit::uninit())
+            .take(src.required_idxes())
+            .collect();
 
         let target = Rc::get_mut(&mut rc).expect("just created, not cloned");
 
         // Initialize `Strs` in place
-        let strs = Strs::init_from_slice(slice, target) as *mut Strs<Idx>;
+        let strs = Strs::init_from_slice(src, target) as *mut Strs<Idx>;
 
         let _ = Rc::into_raw(rc);
         // ## Safety
@@ -283,7 +288,7 @@ impl<Idx: TrustedIdx> Strs<Idx> {
     // and thus probably shouldn't be inlined
     #[allow(clippy::missing_inline_in_public_items)]
     pub fn boxed<S: AsRef<str>>(slice: &[S]) -> Box<Self> {
-        let req = Self::required_idxes_for(slice);
+        let src = Source::new(slice);
 
         // Allocate required memory
         //
@@ -291,10 +296,12 @@ impl<Idx: TrustedIdx> Strs<Idx> {
         // this is as performant, as the nightly methods
         //
         // [^0]: https://godbolt.org/z/43b8Kz
-        let mut boxed: Box<[MaybeUninit<Idx>]> = repeat(MaybeUninit::uninit()).take(req).collect();
+        let mut boxed: Box<[MaybeUninit<Idx>]> = repeat(MaybeUninit::uninit())
+            .take(src.required_idxes())
+            .collect();
 
         // Initialize `Strs` in place
-        let strs = Strs::init_from_slice(slice, boxed.deref_mut()) as *mut Strs<Idx>;
+        let strs = Strs::init_from_slice(src, boxed.deref_mut()) as *mut Strs<Idx>;
 
         // Forget
         Box::into_raw(boxed);
@@ -548,14 +555,14 @@ impl<Idx: TrustedIdx> Strs<Idx> {
         Self::from_raw_parts_mut(slice.as_mut_ptr(), size)
     }
 
-    /// Return space required for creating `Strs` from the given slice in **idxes**.
-    ///
-    /// That's it - to create `Strs` from `slice` you need a `&[Idx]`-slice with
-    /// `.len() == Strs::required_idxes_for(slice)`
-    #[inline]
-    pub fn required_idxes_for<T: AsRef<str>>(slice: &[T]) -> usize {
-        Self::required_idxes_for_and_size(slice).0
-    }
+    // /// Return space required for creating `Strs` from the given slice in **idxes**.
+    // ///
+    // /// That's it - to create `Strs` from `slice` you need a `&[Idx]`-slice with
+    // /// `.len() == Strs::required_idxes_for(slice)`
+    // #[inline]
+    // pub fn required_idxes_for<T: AsRef<str>>(slice: &[T]) -> usize {
+    //     Self::required_idxes_for_and_size(slice).0
+    // }
 
     fn required_idxes_for_and_size<T: AsRef<str>>(slice: &[T]) -> (usize, usize) {
         let size: usize = slice.iter().map(|s| s.as_ref().len()).sum();
@@ -591,10 +598,14 @@ impl<Idx: TrustedIdx> Strs<Idx> {
     #[track_caller]
     #[allow(clippy::missing_inline_in_public_items)]
     pub fn init_from_slice<'t, S: AsRef<str>>(
-        slice: &[S],
+        src: Source<S, Idx>,
         target: &'t mut [MaybeUninit<Idx>],
     ) -> &'t mut Self {
-        let (required_words, size) = Self::required_idxes_for_and_size(slice);
+        //let (required_words, size) = Self::required_idxes_for_and_size(slice);
+        let required_words = src.required_idxes();
+        let size = src.size();
+        let slice = src.slice();
+
         let len = slice.len();
         let indices = len + 1;
 
@@ -876,6 +887,7 @@ pub(crate) fn malicious_as_ref(_n: u8) -> ! {
 #[cfg(test)]
 mod tests {
     //use crate::Strs;
+    use crate::int::Source;
     use crate::Strs;
     use core::mem::{self, MaybeUninit};
     use std::cell::Cell;
@@ -904,9 +916,11 @@ mod tests {
 
     #[test]
     fn tail_is_initialized() {
-        let mut uninit = box_new_uninit_slice(<Strs>::required_idxes_for(&["x"]));
+        let src = Source::new(&["x"]);
 
-        let _ = <Strs>::init_from_slice(&["x"], &mut *uninit);
+        let mut uninit = box_new_uninit_slice(src.required_idxes());
+
+        let _ = <Strs>::init_from_slice(src, &mut *uninit);
 
         let mut tail = [0; mem::size_of::<u16>()];
         tail[0] = b'x';
@@ -956,8 +970,9 @@ mod tests {
   left: `4`,
  right: `3`: `target` is bigger or smaller that required for this operation")]
     fn not_enough_space() {
-        let mut uninit = box_new_uninit_slice(<Strs>::required_idxes_for(&["x"]) - 1);
-        let _ = <Strs>::init_from_slice(&["x"], &mut *uninit);
+        let src = Source::new(&["x"]);
+        let mut uninit = box_new_uninit_slice(src.required_idxes() - 1);
+        let _ = <Strs>::init_from_slice(src, &mut *uninit);
     }
 
     #[test]
@@ -965,8 +980,9 @@ mod tests {
   left: `4`,
  right: `5`: `target` is bigger or smaller that required for this operation")]
     fn too_much_space() {
-        let mut uninit = box_new_uninit_slice(<Strs>::required_idxes_for(&["x"]) + 1);
-        let _ = <Strs>::init_from_slice(&["x"], &mut *uninit);
+        let src = Source::new(&["x"]);
+        let mut uninit = box_new_uninit_slice(src.required_idxes() + 1);
+        let _ = <Strs>::init_from_slice(src, &mut *uninit);
     }
 
     /// Try to write a lot more, than expected (panic while writing)
@@ -974,7 +990,7 @@ mod tests {
     #[should_panic(expected = "malicious S::as_ref (0)")]
     fn malicious_as_ref_greater() {
         let badarr = [MaliciousAsRef {
-            n: Cell::new(0),
+            first: Cell::new(true),
             l: "a",
             g: "bbbbbbbbb",
         }];
@@ -985,7 +1001,7 @@ mod tests {
     #[should_panic(expected = "malicious S::as_ref (1)")]
     fn malicious_as_ref_less() {
         let badarr = [MaliciousAsRef {
-            n: Cell::new(0),
+            first: Cell::new(true),
             l: "aaaaaaaaa",
             g: "b",
         }];
@@ -996,7 +1012,7 @@ mod tests {
     #[should_panic(expected = "malicious S::as_ref (1)")]
     fn malicious_as_ref_greater_small_diff_but_not_char_boundary() {
         let badarr = [MaliciousAsRef {
-            n: Cell::new(0),
+            first: Cell::new(true),
             l: "a",
             g: "ä",
         }];
@@ -1007,7 +1023,7 @@ mod tests {
     #[should_panic(expected = "malicious S::as_ref (1)")]
     fn malicious_as_ref_greater_small_diff() {
         let badarr = [MaliciousAsRef {
-            n: Cell::new(0),
+            first: Cell::new(true),
             l: "a",
             g: "bb",
         }];
@@ -1018,7 +1034,7 @@ mod tests {
     #[should_panic(expected = "malicious S::as_ref (1)")]
     fn malicious_as_ref_less_small_diff() {
         let badarr = [MaliciousAsRef {
-            n: Cell::new(0),
+            first: Cell::new(true),
             l: "aaa",
             g: "b",
         }];
@@ -1028,18 +1044,15 @@ mod tests {
     /// A test util structure that returns `self.l` upon first 2 calls to `.as_ref()`
     /// and self.g from 3-rd.
     struct MaliciousAsRef {
-        n: Cell<u8>,
+        first: Cell<bool>,
         l: &'static str,
         g: &'static str,
     }
 
     impl AsRef<str> for MaliciousAsRef {
         fn as_ref(&self) -> &str {
-            let val = self.n.get();
-            // `required_words_for_and_size` is called in both `Strs::boxed`
-            // and Strs::init_from_slice
-            if val < 2 {
-                self.n.set(val + 1);
+            if self.first.get() {
+                self.first.set(false);
                 self.l
             } else {
                 self.g
