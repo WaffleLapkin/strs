@@ -14,6 +14,7 @@ pub struct Source<'a, S, Idx: TrustedIdx> {
 
 impl<'a, S: AsRef<str>, Idx: TrustedIdx> Source<'a, S, Idx> {
     /// Creates a new source that can be later used to initialize [`Strs`](crate::Strs)
+    #[inline]
     pub fn new(slice: &'a [S]) -> Self {
         let (req, size) = Strs::<Idx>::required_idxes_for_and_size(slice);
         Self {
@@ -25,11 +26,13 @@ impl<'a, S: AsRef<str>, Idx: TrustedIdx> Source<'a, S, Idx> {
     }
 
     /// Get underling slice that was previously passed to [`new`](Self::new)
+    #[inline]
     pub fn slice(&self) -> &'a [S] {
         self.slice
     }
 
     /// Return number of `Idx`es needed to store/init [`Strs`](crate::Strs)
+    #[inline]
     pub fn required_idxes(&self) -> usize {
         self.req
     }
