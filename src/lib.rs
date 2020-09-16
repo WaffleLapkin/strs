@@ -606,7 +606,9 @@ impl<Idx: TrustedIdx> Strs<Idx> {
     ///
     /// ## Panics / Aborts
     ///
-    /// If `S`'s implementation of `AsRef<str>` is malicious (return different
+    /// If `target` is not `src.required_idxes()` long.
+    ///
+    /// Or if `S`'s implementation of `AsRef<str>` is malicious (return different
     /// values upon call on the same `S`).
     #[inline]
     #[track_caller]
@@ -878,14 +880,12 @@ impl<Idx: TrustedIdx> Strs<Idx> {
         let len = slice.len();
         let indices = len + 1;
 
-        if !trusted {
-            // Check that size of target is exactly equal to required
-            assert_eq!(
-                required_words,
-                target.len(),
-                "`target` is bigger or smaller that required for this operation"
-            );
-        }
+        // Check that size of target is exactly equal to required
+        assert_eq!(
+            required_words,
+            target.len(),
+            "`target` is bigger or smaller that required for this operation"
+        );
 
         // write `len` field
         target[0] = MaybeUninit::new(Idx::from_usize(len));
