@@ -1,5 +1,8 @@
 //! TODO: crate docs
 #![cfg_attr(feature = "nightly", feature(exact_size_is_empty))]
+// We can't use `min_specialization` because we need to specialize on trait
+#![cfg_attr(feature = "nightly", feature(specialization))]
+#![cfg_attr(feature = "nightly", allow(incomplete_features))]
 #![warn(clippy::missing_inline_in_public_items, clippy::inline_always)]
 //#![deny(missing_docs)] // TODO
 
@@ -16,7 +19,10 @@ use core::{
 };
 use std::{process::abort, rc::Rc, sync::Arc};
 
-use crate::int::{Source, TrustedIdx};
+use crate::{
+    int::{Source, TrustedIdx},
+    trust::{is_trusted_as_ref, TrustedSource},
+};
 
 mod error;
 mod iter;
@@ -24,6 +30,9 @@ mod trusted_idx;
 
 /// Mostly **int**ernal, yet `pub`lic things.
 pub mod int;
+
+/// Things related to trusting `AsRef<str>` impls
+pub mod trust;
 
 pub use {error::FromSliceError, iter::Iter};
 
@@ -164,6 +173,8 @@ impl<Idx: TrustedIdx> Strs<Idx> {
     // using here a const from `Idx` because we can't use generics in consts without Freeze
     // see https://github.com/rust-lang/rfcs/pull/2944#issuecomment-685087090
     pub const EMPTY: &'static Self = Idx::EMPTY_STRS;
+
+    // FIXME(waffle): add unchecked versions for arced/rced/boxed
 
     /// Creates `Arc<Strs>` from `&[S: AsRef<str>]`.
     ///
@@ -573,104 +584,105 @@ impl<Idx: TrustedIdx> Strs<Idx> {
         (req, size)
     }
 
-    /// Writes content of `vec` into target in a pretty compact way.
+    /// Writes content of `src` into `target` in a pretty compact way, returning
+    /// reference into the `target`.
     ///
-    /// This function is low-level,so if you just want to create [`Strs`] consider using [`arced`],
-    /// [`boxed`] or [`rced`].
+    /// This function is low-level, so if you just want to create [`Strs`]
+    /// consider using [`arced`], [`boxed`] or [`rced`].
     ///
     /// [`arced`]: Self::arced
     /// [`boxed`]: Self::boxed
     /// [`rced`]: Self::rced
     ///
-    /// ## Guarantees
+    /// ## Guarantees (which `unsafe` code can use)
     ///
     /// This function **guarantee** that
-    /// - `data` part (not `size` though) of the output reference points to the same location as
-    ///   `target`, this means that e.g. if `target` was received from `Box` you can recreate
-    ///   `Box<Strs>` from output of this function
-    /// - After calling it `target` will be fully initialized e.i.: calling
-    ///   `MaybeUninit::slice_get_mut(target)` **won't** be UB
+    /// - `data` part (not `size` though) of the output reference points to the
+    ///   same location as `target`, this means that e.g. if `target` was
+    ///   received from `Box` you can recreate `Box<Strs>` from output of this
+    ///   function.
+    /// - After calling this function `target` will be fully initialized e.i.:
+    ///   calling `MaybeUninit::slice_get_mut(target)` will **not** be UB.
     ///
-    /// ## Panics
+    /// ## Panics / Aborts
     ///
-    ///
-    ///
+    /// If `S`'s implementation of `AsRef<str>` is malicious (return different
+    /// values upon call on the same `S`).
+    #[inline]
     #[track_caller]
-    #[allow(clippy::missing_inline_in_public_items)]
     pub fn init_from_slice<'t, S: AsRef<str>>(
         src: Source<S, Idx>,
         target: &'t mut [MaybeUninit<Idx>],
     ) -> &'t mut Self {
-        //let (required_words, size) = Self::required_idxes_for_and_size(slice);
-        let required_words = src.required_idxes();
-        let size = src.size();
-        let slice = src.slice();
+        unsafe { Self::init_from_slice_impl(src, target, is_trusted_as_ref::<S>()) }
+    }
 
-        let len = slice.len();
-        let indices = len + 1;
-
-        // Check that size of target is exactly equal to required
-        assert_eq!(
-            required_words,
-            target.len(),
-            "`target` is bigger or smaller that required for this operation"
-        );
-
-        // write `len` field
-        target[0] = MaybeUninit::new(Idx::from_usize(len));
-
-        let buf_ptr = unsafe { target.as_mut_ptr().offset(1).cast::<u8>() };
-        let target_buf_bytes = (target.len() - 1) * mem::size_of::<Idx>();
-
-        // offset from `buf_ptr` to the empty place
-        let mut offset = indices * mem::size_of::<Idx>();
-        for (idx, s) in slice.iter().enumerate() {
-            let str = s.as_ref();
-
-            // Double check that we didn't run out of space because `S::as_ref` may be
-            // malicious and return different strings upon calls (I wish it was pure...)
-            if offset + str.len() > target_buf_bytes {
-                malicious_as_ref(0)
-            }
-
-            unsafe {
-                buf_ptr
-                    .cast::<Idx>()
-                    .add(idx)
-                    .write(Idx::from_usize(offset));
-            }
-
-            // ## Safety
-            unsafe {
-                ptr::copy_nonoverlapping(str.as_bytes().as_ptr(), buf_ptr.add(offset), str.len())
-            }
-
-            offset += str.len();
-        }
-
-        unsafe {
-            buf_ptr
-                .cast::<Idx>()
-                .add(indices - 1)
-                .write(Idx::from_usize(offset));
-        }
-
-        unsafe {
-            // Double check that we've written exactly as many bytes as we've expected
-            // (yet again malicious `S::as_ref`)
-            let size_written = offset - indices * mem::size_of::<Idx>();
-            if size_written != size {
-                malicious_as_ref(1)
-            }
-
-            let tail = target_buf_bytes - offset;
-            // Fill/initialize the tail to guarantee that `target` is fully initialized
-            ptr::write_bytes(buf_ptr.add(offset), 0, tail);
-        }
-
-        unsafe {
-            Self::from_raw_parts_mut(target.as_mut_ptr().cast::<Idx>(), Idx::from_usize(size))
-        }
+    /// Writes content of `src` into `target` in a pretty compact way, returning
+    /// reference into the `target`.
+    ///
+    /// In difference from [`init_from_slice`] this function does **not** check
+    /// whatever `S`'s implementation of `AsRef<str>` is malicious. Instead, it
+    /// accepts `impl Into<TrustedSource<'_, S, Idx>>` which guarantees that `S`
+    /// is trusted.
+    ///
+    /// [`init_from_slice`]: Self::init_from_slice
+    ///
+    /// ## Examples
+    ///
+    /// With a `TrustedAsRef` type:
+    ///
+    /// ```
+    /// use strs::int::Source;
+    /// use strs::Strs;
+    /// use std::mem::MaybeUninit;
+    ///
+    /// let src = Source::new(&["a", "b"]);
+    /// let mut target = vec![MaybeUninit::uninit(); src.required_idxes()];
+    /// // Note: no unsafe, `TrustedSource<S, Idx>` implements
+    /// //       `From<Source<S, Idx>>` where S: `TrustedAsRef`
+    /// let strs = <Strs>::init_from_slice_unchecked(src, &mut target);
+    ///
+    /// assert_eq!(&strs[0], "a");
+    /// assert_eq!(&strs[1], "b");
+    /// ```
+    ///
+    /// With a type from another crate, which doesn't implement `TrustedAsRef`,
+    /// but you trust it:
+    ///
+    /// ```
+    /// # mod mystr { pub struct Str<'a>(pub &'a str); impl AsRef<str> for Str<'_> {fn as_ref(&self) -> &str { self.0 } } }
+    /// use std::mem::MaybeUninit;
+    ///
+    /// // Imagine that it's a foreign crate with custom str type
+    /// use mystr::Str;
+    ///
+    /// use strs::{int::Source, Strs, trust::trust};
+    ///
+    ///
+    /// let src = Source::new(&[Str("a"), Str("b")]);
+    /// let mut target = vec![MaybeUninit::uninit(); src.required_idxes()];
+    ///
+    /// // ## Safety
+    /// //
+    /// // - `Str`'s implementation of `AsRef` was checked to be pure.
+    /// // - `mystr` crate is pinned in Cargo.toml with "=version" so it
+    /// //   couldn't be implicitly updated
+    /// let strs =  <Strs>::init_from_slice_unchecked(unsafe { trust(src) }, &mut target);
+    ///
+    /// assert_eq!(&strs[0], "a");
+    /// assert_eq!(&strs[1], "b");
+    /// ```
+    #[inline]
+    #[track_caller]
+    pub fn init_from_slice_unchecked<'a, 't, Src, S>(
+        src: Src,
+        target: &'t mut [MaybeUninit<Idx>],
+    ) -> &'t mut Self
+    where
+        Src: Into<TrustedSource<'a, S, Idx>>,
+        S: 'a + AsRef<str>,
+    {
+        unsafe { Self::init_from_slice_impl(src.into().into_inner(), target, true) }
     }
 }
 
@@ -849,6 +861,86 @@ impl<Idx: TrustedIdx> Strs<Idx> {
         // Invariants of the `Strs` guarantee that `buf` is filled from start with `len+1`
         // `usize`-indices, the caller guarantees that `idx < len`.
         ((*ptr).as_usize(), (*ptr.add(1)).as_usize())
+    }
+
+    #[track_caller]
+    #[allow(clippy::missing_inline_in_public_items, unused_unsafe)]
+    unsafe fn init_from_slice_impl<'t, S: AsRef<str>>(
+        src: Source<S, Idx>,
+        target: &'t mut [MaybeUninit<Idx>],
+        trusted: bool,
+    ) -> &'t mut Self {
+        //let (required_words, size) = Self::required_idxes_for_and_size(slice);
+        let required_words = src.required_idxes();
+        let size = src.size();
+        let slice = src.slice();
+
+        let len = slice.len();
+        let indices = len + 1;
+
+        if !trusted {
+            // Check that size of target is exactly equal to required
+            assert_eq!(
+                required_words,
+                target.len(),
+                "`target` is bigger or smaller that required for this operation"
+            );
+        }
+
+        // write `len` field
+        target[0] = MaybeUninit::new(Idx::from_usize(len));
+
+        let buf_ptr = unsafe { target.as_mut_ptr().offset(1).cast::<u8>() };
+        let target_buf_bytes = (target.len() - 1) * mem::size_of::<Idx>();
+
+        // offset from `buf_ptr` to the empty place
+        let mut offset = indices * mem::size_of::<Idx>();
+        for (idx, s) in slice.iter().enumerate() {
+            let str = s.as_ref();
+
+            // Double check that we didn't run out of space because `S::as_ref` may be
+            // malicious and return different strings upon calls (I wish it was pure...)
+            if !trusted && offset + str.len() > target_buf_bytes {
+                malicious_as_ref(0)
+            }
+
+            unsafe {
+                buf_ptr
+                    .cast::<Idx>()
+                    .add(idx)
+                    .write(Idx::from_usize(offset));
+            }
+
+            // ## Safety
+            unsafe {
+                ptr::copy_nonoverlapping(str.as_bytes().as_ptr(), buf_ptr.add(offset), str.len())
+            }
+
+            offset += str.len();
+        }
+
+        unsafe {
+            buf_ptr
+                .cast::<Idx>()
+                .add(indices - 1)
+                .write(Idx::from_usize(offset));
+        }
+
+        unsafe {
+            // Double check that we've written exactly as many bytes as we've expected
+            // (yet again malicious `S::as_ref`)
+            if !trusted && (offset - indices * mem::size_of::<Idx>()) != size {
+                malicious_as_ref(1)
+            }
+
+            let tail = target_buf_bytes - offset;
+            // Fill/initialize the tail to guarantee that `target` is fully initialized
+            ptr::write_bytes(buf_ptr.add(offset), 0, tail);
+        }
+
+        unsafe {
+            Self::from_raw_parts_mut(target.as_mut_ptr().cast::<Idx>(), Idx::from_usize(size))
+        }
     }
 
     fn as_raw(&self) -> &[Idx] {
